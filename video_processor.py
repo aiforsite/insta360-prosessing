@@ -53,9 +53,11 @@ class VideoProcessor:
         self.low_res_fps = self.config['low_res_frames_per_second']
         self.route_fps = self.config['route_calculation_fps']
         self.grace_period_days = self.config['video_deletion_grace_period_days']
+        self.candidates_per_second = self.config.get('candidates_per_second', 12)  # Frames per second for selection
 
         self.current_task_id = None
         self.current_video_recording_id = None
+        self.blur_people = False  # Can be set from task data if needed
         
         # Ensure work directory exists
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -239,126 +241,210 @@ class VideoProcessor:
             self.update_status_text(f"Virhe stitchauksessa: {str(e)}")
             return False
     
-    def extract_frames(self, video_path: Path, output_dir: Path, fps: float) -> List[Path]:
-        """Extract frames from video at specified FPS."""
-        logger.info(f"Extracting frames at {fps} FPS from {video_path}...")
-        output_dir.mkdir(parents=True, exist_ok=True)
+    def _calculate_sharpness(self, image_path: Path) -> float:
+        """Calculate Laplacian variance as sharpness metric."""
+        try:
+            import cv2
+            img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                logger.warning(f"Could not read image for sharpness calculation: {image_path}")
+                return 0.0
+            return cv2.Laplacian(img, cv2.CV_64F).var()
+        except Exception as e:
+            logger.warning(f"Error calculating sharpness for {image_path}: {e}")
+            return 0.0
+    
+    def extract_frames_high_and_low(self, video_path: Path, high_dir: Path, low_dir: Path, fps: float) -> Tuple[List[Path], List[Path]]:
+        """Extract high and low resolution frames simultaneously."""
+        logger.info(f"Extracting {fps} FPS frames (high and low res) from {video_path}...")
+        high_dir.mkdir(parents=True, exist_ok=True)
+        low_dir.mkdir(parents=True, exist_ok=True)
         
-        frame_paths = []
         try:
             import subprocess
-            # Extract frames using ffmpeg with specified quality
-            pattern = str(output_dir / "frame_%06d.jpg")
-            cmd = [
+            
+            # Extract high res frames (max quality)
+            high_pattern = str(high_dir / "high_%06d.jpg")
+            high_cmd = [
                 'ffmpeg',
                 '-i', str(video_path),
-                '-vf', f'fps={fps}',
-                '-qscale:v', '1',
-                pattern
+                '-vf', f'fps={fps}/1:round=up',
+                '-q:v', '0',  # Max quality
+                '-start_number', '0',
+                high_pattern
             ]
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True
-            )
             
-            if result.stderr:
-                logger.debug(f"FFmpeg stderr: {result.stderr}")
+            # Extract low res frames (1920x1080)
+            low_pattern = str(low_dir / "low_%06d.jpg")
+            low_cmd = [
+                'ffmpeg',
+                '-i', str(video_path),
+                '-vf', f'fps={fps}/1:round=up',
+                '-s', '1920x1080',
+                '-q:v', '0',
+                '-start_number', '0',
+                low_pattern
+            ]
+            
+            # Execute both commands
+            result_high = subprocess.run(high_cmd, check=True, capture_output=True, text=True)
+            result_low = subprocess.run(low_cmd, check=True, capture_output=True, text=True)
             
             # Collect frame paths
-            frame_paths = sorted(output_dir.glob("frame_*.jpg"))
-            logger.info(f"Extracted {len(frame_paths)} frames")
-            return frame_paths
+            high_frames = sorted(high_dir.glob("high_*.jpg"))
+            low_frames = sorted(low_dir.glob("low_*.jpg"))
+            
+            logger.info(f"Extracted {len(high_frames)} high res and {len(low_frames)} low res frames")
+            return high_frames, low_frames
+            
         except subprocess.CalledProcessError as e:
             logger.error(f"Frame extraction failed with exit code {e.returncode}")
-            if e.stdout:
-                logger.error(f"stdout: {e.stdout}")
             if e.stderr:
                 logger.error(f"stderr: {e.stderr}")
-            return []
+            return [], []
         except Exception as e:
             logger.error(f"Frame extraction failed: {e}")
-            return []
+            return [], []
     
-    def create_frames(self, stitched_path: Path) -> List[Path]:
-        """5. Create frames (12-15/s) from stitched file."""
-        self.update_status_text(f"Luodaan framet ({self.frames_per_second}/s) stitchatusta tiedostosta...")
-        frames_dir = self.work_dir / "frames"
-        frames = self.extract_frames(stitched_path, frames_dir, self.frames_per_second)
-        if frames:
-            self.update_status_text(f"Luotu {len(frames)} framea")
-        return frames
-
-    def encode_low_res_frames(self, frame_paths: List[Path], output_dir: Path) -> List[Path]:
-        """6. Encode low res frames."""
-        logger.info("Encoding low resolution frames...")
-        self.update_status_text("Enkoodataan low res framet...")
-        output_dir.mkdir(parents=True, exist_ok=True)
+    def _select_best_frames_by_sharpness(self, high_frames: List[Path], candidates_per_second: int) -> set[int]:
+        """Select best frames based on sharpness from each group of candidates_per_second frames."""
+        if not high_frames:
+            return set()
         
-        low_res_frames = []
-        try:
-            import subprocess
-            from PIL import Image
+        # Calculate sharpness for all high-res frames
+        candidates_with_sharpness = []
+        for frame_path in high_frames:
+            try:
+                # Extract frame number from filename (e.g., "high_000001.jpg" -> 1)
+                suffix = int(frame_path.stem.split("_")[-1])
+                sharpness = self._calculate_sharpness(frame_path)
+                candidates_with_sharpness.append((suffix, frame_path, sharpness))
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Could not parse frame number from {frame_path}: {e}")
+                continue
+        
+        if not candidates_with_sharpness:
+            logger.warning("No high-res candidates found for selection")
+            return set()
+        
+        # Sort by suffix
+        candidates_with_sharpness.sort(key=lambda x: x[0])
+        
+        # Group by second and select sharpest from each group
+        selected_suffixes = set()
+        for i in range(0, len(candidates_with_sharpness), candidates_per_second):
+            second_group = candidates_with_sharpness[i:i + candidates_per_second]
+            if not second_group:
+                break
             
-            for i, frame_path in enumerate(frame_paths):
-                # Resize to low resolution
-                img = Image.open(frame_path)
-                img_low = img.resize((640, 360), Image.Resampling.LANCZOS)
-                
-                output_path = output_dir / f"low_res_{i:06d}.jpg"
-                img_low.save(output_path, quality=85)
-                low_res_frames.append(output_path)
+            # Select sharpest from this group
+            best_suffix, best_path, best_sharpness = max(second_group, key=lambda x: x[2])
+            selected_suffixes.add(best_suffix)
             
-            logger.info(f"Encoded {len(low_res_frames)} low res frames")
-            self.update_status_text(f"Enkoodattu {len(low_res_frames)} low res framea")
-            return low_res_frames
-        except Exception as e:
-            logger.error(f"Low res encoding failed: {e}")
-            self.update_status_text(f"Virhe low res enkoodauksessa: {str(e)}")
-            return []
+            target_second = i // candidates_per_second
+            logger.debug(f"Second {target_second}: selected frame {best_suffix} (sharpness={best_sharpness:.2f})")
+        
+        logger.info(f"Selected {len(selected_suffixes)} best frames from {len(candidates_with_sharpness)} candidates")
+        return selected_suffixes
     
-    def select_best_timestamps(self, low_res_frames: List[Path], interval: float = 1.0) -> List[Path]:
-        """7. Extract best timestamps from low res frames at 1/s interval."""
-        logger.info(f"Selecting best frames at {interval}/s interval...")
-        self.update_status_text(f"Poimitaan parhaat ajankohdat low res frameista ({interval}/s intervallilla)...")
+    def create_and_select_frames(self, stitched_path: Path) -> Tuple[List[Path], List[Path]]:
+        """5. Extract 12fps frames (high and low res), select sharpest from each group."""
+        self.update_status_text(f"Luodaan framet ({self.candidates_per_second}/s) stitchatusta tiedostosta...")
         
-        if not low_res_frames:
-            return []
+        high_dir = self.work_dir / "high_frames"
+        low_dir = self.work_dir / "low_frames"
         
-        # Calculate frame interval based on original FPS
-        frame_interval = int(self.low_res_fps * interval)
-        selected = low_res_frames[::frame_interval] if frame_interval > 0 else low_res_frames
+        # Extract high and low res frames
+        high_frames, low_frames = self.extract_frames_high_and_low(
+            stitched_path, high_dir, low_dir, self.candidates_per_second
+        )
         
-        logger.info(f"Selected {len(selected)} frames")
-        self.update_status_text(f"Valittu {len(selected)} parasta framea")
-        return selected
+        if not high_frames or not low_frames:
+            self.update_status_text("Virhe: Framejen luonti epäonnistui")
+            return [], []
+        
+        self.update_status_text(f"Luotu {len(high_frames)} high res ja {len(low_frames)} low res framea")
+        
+        # Select best frames based on sharpness
+        self.update_status_text("Valitaan terävimmät framet jokaisesta sekunnista...")
+        selected_suffixes = self._select_best_frames_by_sharpness(high_frames, self.candidates_per_second)
+        
+        # Filter frames to only selected ones
+        selected_high = [f for f in high_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
+        selected_low = [f for f in low_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
+        
+        # Remove unselected frames
+        for frame in high_frames:
+            if frame not in selected_high:
+                try:
+                    frame.unlink()
+                except FileNotFoundError:
+                    pass
+        
+        for frame in low_frames:
+            if frame not in selected_low:
+                try:
+                    frame.unlink()
+                except FileNotFoundError:
+                    pass
+        
+        # Move selected frames to final directory
+        selected_dir = self.work_dir / "selected_frames"
+        selected_dir.mkdir(parents=True, exist_ok=True)
+        
+        final_high = []
+        final_low = []
+        
+        for high_frame, low_frame in zip(selected_high, selected_low):
+            suffix = high_frame.stem.split("_")[-1]
+            new_high = selected_dir / f"high_{suffix}.jpg"
+            new_low = selected_dir / f"low_{suffix}.jpg"
+            
+            shutil.move(str(high_frame), str(new_high))
+            shutil.move(str(low_frame), str(new_low))
+            
+            final_high.append(new_high)
+            final_low.append(new_low)
+        
+        self.update_status_text(f"Valittu {len(final_high)} parasta framea")
+        return final_high, final_low
     
-    def blur_frames(self, frame_paths: List[Path], output_dir: Path) -> List[Path]:
-        """8. Do frame blurring for low res and encode if needed."""
+    def blur_frames_optional(self, high_frames: List[Path], low_frames: List[Path]) -> Tuple[List[Path], List[Path]]:
+        """8. Optionally blur frames if blur_people is enabled."""
+        if not self.blur_people:
+            logger.info("Blur not enabled, skipping blur step")
+            return high_frames, low_frames
+        
         logger.info("Applying blur to frames...")
-        self.update_status_text("Tehdään frame blurraus low res frameille...")
-        output_dir.mkdir(parents=True, exist_ok=True)
+        self.update_status_text("Tehdään frame blurraus...")
         
-        blurred_frames = []
+        blurred_high = []
+        blurred_low = []
+        
         try:
             from PIL import Image, ImageFilter
             
-            for i, frame_path in enumerate(frame_paths):
+            for frame_path in high_frames:
                 img = Image.open(frame_path)
                 blurred = img.filter(ImageFilter.GaussianBlur(radius=2))
-                
-                output_path = output_dir / f"blurred_{i:06d}.jpg"
-                blurred.save(output_path, quality=85)
-                blurred_frames.append(output_path)
+                blurred_path = frame_path.parent / f"b_{frame_path.name}"
+                blurred.save(blurred_path, quality=85)
+                blurred_high.append(blurred_path)
             
-            logger.info(f"Blurred {len(blurred_frames)} frames")
-            self.update_status_text(f"Blurrattu {len(blurred_frames)} framea")
-            return blurred_frames
+            for frame_path in low_frames:
+                img = Image.open(frame_path)
+                blurred = img.filter(ImageFilter.GaussianBlur(radius=2))
+                blurred_path = frame_path.parent / f"b_{frame_path.name}"
+                blurred.save(blurred_path, quality=85)
+                blurred_low.append(blurred_path)
+            
+            logger.info(f"Blurred {len(blurred_high)} high and {len(blurred_low)} low frames")
+            self.update_status_text(f"Blurrattu {len(blurred_high)} framea")
+            return blurred_high, blurred_low
         except Exception as e:
             logger.error(f"Frame blurring failed: {e}")
             self.update_status_text(f"Virhe frame blurrauksessa: {str(e)}")
-            return []
+            return high_frames, low_frames
     
     def upload_frames_to_cloud(self, frame_paths: List[Path]) -> List[Dict]:
         """9. Save frames to cloud and create frame objects."""
@@ -397,17 +483,11 @@ class VideoProcessor:
         self.update_status_text(f"Tallennettu {len(frame_objects)} framea pilveen")
         return frame_objects
     
-    def extract_route_frames(self, stitched_path: Path, fps_range: Dict) -> List[Path]:
-        """10. Extract desired frames for route calculation at 1-4 frames/s."""
-        logger.info(f"Extracting route calculation frames at {fps_range['min']}-{fps_range['max']} FPS...")
-        route_fps = (fps_range['min'] + fps_range['max']) / 2
-        self.update_status_text(f"Poimitaan halutut framet reitin laskentaa varten ({fps_range['min']}-{fps_range['max']} frames/s)...")
-        
-        route_frames_dir = self.work_dir / "route_frames"
-        frames = self.extract_frames(stitched_path, route_frames_dir, route_fps)
-        if frames:
-            self.update_status_text(f"Poimittu {len(frames)} framea reitin laskentaan")
-        return frames
+    def get_route_frames_from_low_res(self, low_frames: List[Path]) -> List[Path]:
+        """10. Use 12fps low res frames for route calculation."""
+        logger.info(f"Using {len(low_frames)} low res frames for route calculation...")
+        self.update_status_text(f"Käytetään {len(low_frames)} low res framea reitin laskentaan...")
+        return low_frames
     
     def calculate_route(self, frame_paths: List[Path]) -> Optional[Dict]:
         """11. Calculate route using selected frames (Stella VSLAM) and update raw path."""
@@ -561,37 +641,29 @@ class VideoProcessor:
             if not self.stitch_videos(front_path, back_path, stitched_path):
                 raise Exception("Failed to stitch videos")
             
-            # Step 5: Create frames
-            frame_paths = self.create_frames(stitched_path)
-            if not frame_paths:
-                raise Exception("Failed to extract frames")
+            # Step 5: Create and select frames (12fps high and low res, select sharpest)
+            selected_high, selected_low = self.create_and_select_frames(stitched_path)
+            if not selected_high or not selected_low:
+                raise Exception("Failed to create and select frames")
             
-            # Step 6: Encode low res frames
-            low_res_dir = self.work_dir / "low_res_frames"
-            low_res_frames = self.encode_low_res_frames(frame_paths, low_res_dir)
+            # Step 6: Optional blur
+            final_high, final_low = self.blur_frames_optional(selected_high, selected_low)
             
-            # Step 7: Select best timestamps
-            best_frames = self.select_best_timestamps(low_res_frames, interval=1.0)
+            # Step 7: Upload frames to cloud
+            frame_objects = self.upload_frames_to_cloud(final_high + final_low)
             
-            # Step 8: Blur frames
-            blurred_dir = self.work_dir / "blurred_frames"
-            blurred_frames = self.blur_frames(best_frames, blurred_dir)
+            # Step 8: Use 12fps low res frames for route calculation
+            route_frames = self.get_route_frames_from_low_res(selected_low)
             
-            # Step 9: Upload frames to cloud
-            frame_objects = self.upload_frames_to_cloud(blurred_frames)
-            
-            # Step 10: Extract route frames
-            route_frames = self.extract_route_frames(stitched_path, self.route_fps)
-            
-            # Step 11: Calculate route
+            # Step 9: Calculate route
             route_data = self.calculate_route(route_frames)
             if route_data:
                 self.update_task_route(route_data)
             
-            # Step 12: Mark videos for deletion
+            # Step 10: Mark videos for deletion
             self.mark_videos_for_deletion()
             
-            # Step 13: Clean local directories
+            # Step 11: Clean local directories
             self.update_status_text("Siivotaan paikalliset hakemistot...")
             self.clean_local_directories()
             

@@ -55,6 +55,7 @@ class VideoProcessor:
         self.grace_period_days = self.config['video_deletion_grace_period_days']
 
         self.current_task_id = None
+        self.current_video_recording_id = None
         
         # Ensure work directory exists
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -126,16 +127,51 @@ class VideoProcessor:
             logger.error(f"Failed to download video: {e}")
             return False
     
+    def fetch_video_recording(self, video_recording_id: str) -> Optional[Dict]:
+        """Fetch video-recording data from API."""
+        logger.info(f"Fetching video-recording data for {video_recording_id}...")
+        return self._api_request('GET', f'/api/v1/video-recording/{video_recording_id}/')
+    
     def download_videos(self, task: Dict) -> Tuple[Optional[Path], Optional[Path]]:
-        """3. Download front and back videos from given addresses."""
+        """3. Download front and back videos from video-recording data."""
         logger.info("Downloading front and back videos...")
         self.update_status_text("Ladataan front ja back videot...")
         
-        front_url = task.get('front_video_url')
-        back_url = task.get('back_video_url')
+        # Fetch video-recording data from API
+        video_recording_id = self.current_video_recording_id
+        if not video_recording_id:
+            logger.error("Missing video_recording_id in task")
+            self.update_status_text("Virhe: video_recording_id puuttuu")
+            return None, None
+        
+        video_recording = self.fetch_video_recording(video_recording_id)
+        if not video_recording:
+            logger.error("Failed to fetch video-recording data")
+            self.update_status_text("Virhe: Video-recording datan haku epäonnistui")
+            return None, None
+        
+        # Find front and back videos from videos list
+        videos = video_recording.get('videos', [])
+        front_video = None
+        back_video = None
+        
+        for video in videos:
+            category = video.get('category')
+            if category == 'video_insta360_raw_front':
+                front_video = video
+            elif category == 'video_insta360_raw_back':
+                back_video = video
+        
+        if not front_video or not back_video:
+            logger.error("Missing front or back video in video-recording data")
+            self.update_status_text("Virhe: Front tai back video puuttuu video-recording datasta")
+            return None, None
+        
+        front_url = front_video.get('url')
+        back_url = back_video.get('url')
         
         if not front_url or not back_url:
-            logger.error("Missing video URLs in task")
+            logger.error("Missing video URLs in video data")
             self.update_status_text("Virhe: Videoiden URL-osoitteet puuttuvat")
             return None, None
         

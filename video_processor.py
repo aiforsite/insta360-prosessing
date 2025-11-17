@@ -274,13 +274,13 @@ class VideoProcessor:
                 high_pattern
             ]
             
-            # Extract low res frames (1920x1080)
+            # Extract low res frames (3840x1920)
             low_pattern = str(low_dir / "low_%06d.jpg")
             low_cmd = [
                 'ffmpeg',
                 '-i', str(video_path),
                 '-vf', f'fps={fps}/1:round=up',
-                '-s', '1920x1080',
+                '-s', '3840x1920',
                 '-q:v', '0',
                 '-start_number', '0',
                 low_pattern

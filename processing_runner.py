@@ -406,16 +406,34 @@ class VideoProcessor:
             else:
                 logger.warning("No reset task found in test mode")
             
-            # Step 2: Fetch task again and do normal processing
+            # Step 2: Reset task status to pending before fetching for processing
+            logger.info("Test mode: Resetting task status to pending before processing...")
+            if self.api_client.set_task_status(self.test_task_uuid, 'pending'):
+                logger.info(f"Test task {self.test_task_uuid} reset to pending for processing")
+            else:
+                logger.warning(f"Failed to reset test task {self.test_task_uuid} to pending")
+            
+            # Step 3: Fetch task again and do normal processing
             logger.info("Test mode: Step 2 - Processing task normally...")
             task = self.api_client.fetch_next_task(reset=False)
             task_id = task.get('uuid') if task else None
             if task and task_id:
                 logger.info(f"Found processing task: {task_id}")
-                self.process_task(task)
-                # Ensure completion status is set
-                logger.info("Test mode: Setting completion status...")
-                self.api_client.report_task_completion(success=True)
+                # Note: Backend may set status to 'processing' when task is fetched
+                # This is expected behavior
+                try:
+                    success = self.process_task(task)
+                    # process_task already calls report_task_completion, but ensure it's done
+                    if success:
+                        logger.info("Test mode: Ensuring completion status is set...")
+                        self.api_client.report_task_completion(success=True)
+                        logger.info("Test mode: Task processing completed successfully")
+                    else:
+                        logger.error("Test mode: Task processing failed")
+                        self.api_client.report_task_completion(success=False, error="Processing failed in test mode")
+                except Exception as e:
+                    logger.error(f"Test mode: Exception during processing: {e}")
+                    self.api_client.report_task_completion(success=False, error=str(e))
                 logger.info("Test mode complete (reset + processing done)")
             else:
                 logger.warning("No processing task found in test mode")

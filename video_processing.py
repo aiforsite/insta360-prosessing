@@ -3,6 +3,7 @@ Video processing module for downloading and stitching videos.
 """
 
 import logging
+import os
 import subprocess
 import requests
 from pathlib import Path
@@ -100,12 +101,24 @@ class VideoProcessing:
                 '-output_size', '5760x2880',
                 '-disable_cuda', 'false'
             ]
+            
+            # Aseta LD_LIBRARY_PATH varmistaaksesi, että CUDA 11.x kirjastot löytyvät
+            cuda11_lib_path = '/usr/local/cuda-11/targets/x86_64-linux/lib'
+            current_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
+            if cuda11_lib_path not in current_ld_path:
+                os.environ['LD_LIBRARY_PATH'] = f"{cuda11_lib_path}:{current_ld_path}" if current_ld_path else cuda11_lib_path
+                logger.info(f"Set LD_LIBRARY_PATH to include CUDA 11.x libraries: {cuda11_lib_path}")
+            
+            # Varmista, että subprocess käyttää päivitettyä ympäristöä
+            env = os.environ.copy()
+            
             logger.info(f"Running MediaSDKTest: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 check=True,
                 capture_output=True,
-                text=True
+                text=True,
+                env=env
             )
             
             if result.stdout:
@@ -113,8 +126,9 @@ class VideoProcessing:
             if result.stderr:
                 logger.warning(f"MediaSDKTest stderr: {result.stderr}")
                 
-                # Check if CUDA/GPU is not being used
                 stderr_lower = result.stderr.lower()
+                
+                # Check if CUDA/GPU is not being used
                 cuda_warnings = [
                     'cudacontext null',
                     'cuda context null',
@@ -129,6 +143,33 @@ class VideoProcessing:
                     logger.warning("⚠️  CUDA/GPU is not being used for stitching! Stitching may be slower or incorrect.")
                     logger.warning("   Check GPU drivers, CUDA installation, and MediaSDKTest configuration.")
                     update_status_callback("Varoitus: GPU ei ole käytössä stitchauksessa")
+                
+                # Check for mask file error
+                if 'can\'t find input: mask' in stderr_lower or 'can\'t find input mask' in stderr_lower:
+                    logger.warning("⚠️  Mask file is missing! MediaSDKTest expects a mask file for AI stitching.")
+                    logger.warning("   This may cause flow estimator to fail and result in incorrect stitching.")
+                    update_status_callback("Varoitus: Mask-tiedosto puuttuu")
+                
+                # Check for flow estimator errors
+                if 'failed to create flow estimator' in stderr_lower or 'flow estimator' in stderr_lower:
+                    logger.error("❌ Flow estimator creation failed! AI stitching may not work correctly.")
+                    logger.error("   This can be caused by:")
+                    logger.error("   - Missing or invalid mask file")
+                    logger.error("   - GPU/CUDA not available")
+                    logger.error("   - Invalid or corrupted AI model file")
+                    logger.error("   - Insufficient GPU memory")
+                    update_status_callback("Virhe: Flow estimatorin luonti epäonnistui")
+                
+                # Check for OpenCL errors
+                if 'opencl init error' in stderr_lower:
+                    logger.warning("⚠️  OpenCL initialization failed, falling back to CPU.")
+                    logger.warning("   Stitching will be slower without OpenCL acceleration.")
+                
+                # Check for model path errors
+                if 'model_path' in stderr_lower and 'error' in stderr_lower:
+                    logger.error("❌ Error with AI model file path!")
+                    logger.error(f"   Model path: {self.media_model_dir}/ai_stitcher_v2.ins")
+                    logger.error("   Verify the path exists and the model file is valid.")
             
             logger.info(f"Videos stitched to {output_path}")
             update_status_callback("Stitchaus valmis")
@@ -140,8 +181,9 @@ class VideoProcessing:
             if e.stderr:
                 logger.error(f"stderr: {e.stderr}")
                 
-                # Check if CUDA/GPU is not being used
                 stderr_lower = e.stderr.lower() if e.stderr else ""
+                
+                # Check if CUDA/GPU is not being used
                 cuda_warnings = [
                     'cudacontext null',
                     'cuda context null',
@@ -155,6 +197,16 @@ class VideoProcessing:
                 if cuda_not_used:
                     logger.warning("⚠️  CUDA/GPU is not being used for stitching! This may be causing the failure.")
                     logger.warning("   Check GPU drivers, CUDA installation, and MediaSDKTest configuration.")
+                
+                # Check for mask file error
+                if 'can\'t find input: mask' in stderr_lower or 'can\'t find input mask' in stderr_lower:
+                    logger.error("❌ Mask file is missing! This is likely causing the stitching failure.")
+                    logger.error("   MediaSDKTest requires a mask file for AI stitching.")
+                
+                # Check for flow estimator errors
+                if 'failed to create flow estimator' in stderr_lower:
+                    logger.error("❌ Flow estimator creation failed! This is likely causing the stitching failure.")
+                    logger.error("   Check mask file, GPU availability, and AI model file.")
             
             update_status_callback(f"Virhe stitchauksessa: {e.stderr or str(e)}")
             return False

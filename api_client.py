@@ -154,7 +154,15 @@ class APIClient:
             logger.error(f"Unexpected error storing image: {e}")
             return None
     
-    def store_video(self, project_id: str, video_type: str, video_size: int, video_binary: bytes) -> Optional[str]:
+    def store_video(
+        self,
+        project_id: str,
+        video_type: str,
+        video_size: int,
+        video_binary: bytes,
+        recording_id: Optional[str] = None,
+        name: Optional[str] = None
+    ) -> Optional[str]:
         """
         Store video binary to cloud storage.
         
@@ -173,9 +181,10 @@ class APIClient:
                 '/api/v1/video/',
                 json={
                     'project': project_id,
-                    'name': 'video',
+                    'name': name or 'video',
                     'size': video_size,
-                    'type': video_type
+                    'type': video_type,
+                    **({'recording': recording_id} if recording_id else {})
                 }
             )
             
@@ -406,6 +415,22 @@ class APIClient:
             'PATCH',
             f'/api/v1/video-recording/{video_recording_id}',
             json={'raw_path': raw_path}
+        )
+        return result is not None
+
+    def set_task_status(self, task_id: str, status: str, status_text: Optional[str] = None) -> bool:
+        """Patch process-recording-task status (used for test/reset)."""
+        if not task_id:
+            logger.warning("Cannot set task status: missing task_id")
+            return False
+        payload = {'status': status}
+        if status_text:
+            payload['status_text'] = status_text
+        logger.info(f"Setting task {task_id} status to {status}")
+        result = self._api_request(
+            'PATCH',
+            f'/api/v1/process-recording-task/{task_id}',
+            json=payload
         )
         return result is not None
     

@@ -381,6 +381,11 @@ class FrameProcessing:
         """Save frames to cloud and create frame objects."""
         logger.info("Uploading frames to cloud...")
         update_status_callback(f"Tallennetaan {len(frame_paths)} framea pilveen ja luodaan frame objektit...")
+
+        if not video_id:
+            logger.error("Cannot upload frames: missing target video_id")
+            update_status_callback("Virhe: video_id puuttuu, frameja ei voida tallentaa")
+            return []
         
         frame_objects = []
         total = len(frame_paths)

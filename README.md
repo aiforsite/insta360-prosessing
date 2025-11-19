@@ -70,7 +70,12 @@ Edit `config.json` to configure processing parameters:
     "min_box_area": 2500,
     "blur_radius": 18,
     "fallback_full_frame": true
-  }
+  },
+  "fallback_video_categories": [
+    "video_insta360_raw_front",
+    "video_insta360_raw_back"
+  ],
+  "test_task_uuid": ""
 }
 
 #### Blur Settings
@@ -80,9 +85,12 @@ Edit `config.json` to configure processing parameters:
 - `min_box_area`: Ignore detections smaller than this pixel area (filters out noise).
 - `blur_radius`: Gaussian blur radius applied to each bounding box.
 - `fallback_full_frame`: When `true`, fall back to full-frame blur if no people are detected or the detector is unavailable.
+- `test_task_uuid`: UUID of a process-recording-task used when running `processing_runner.py --test`.
 ```
 
 > **Security note:** `config.json` now contains API keys and other secrets. Keep it out of version control or manage environment-specific copies securely.
+
+- `fallback_video_categories`: Preference order for existing videos to reuse if stitched upload fails.
 
 ## Usage
 
@@ -161,6 +169,19 @@ This will:
 - Delete all video frames and their associated images
 - Delete related video assets
 - Delete the video-recording entry after cleanup
+
+#### Test Mode
+
+Use test mode to run a single reset iteration against a predefined task (configure `test_task_uuid` in `config.json`):
+
+```bash
+python processing_runner.py --test
+```
+
+This will:
+- Patch the configured task back to `pending`
+- Fetch it with `reset=true`
+- Run the cleanup workflow exactly once (no polling loop)
 
 ## Processing Pipeline
 

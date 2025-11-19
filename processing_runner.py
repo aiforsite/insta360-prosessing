@@ -7,7 +7,7 @@ import json
 import time
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 from api_client import APIClient
 from file_operations import FileOperations
@@ -68,6 +68,8 @@ class VideoProcessor:
             stella_vocab_path or '',
             self.candidates_per_second
         )
+        self.processed_video_id: Optional[str] = None
+        self.test_task_uuid: Optional[str] = self.config.get('test_task_uuid')
     
     def clean_local_directories(self):
         """Clean local directories for safety."""
@@ -185,6 +187,49 @@ class VideoProcessor:
         logger.info(f"Reset cleanup finished for video-recording {video_recording_id}")
         return True
 
+    def _select_fallback_video_id(self, video_recording: Optional[Dict]) -> Optional[str]:
+        """Choose an existing video UUID to associate frames if processed video missing."""
+        if not video_recording:
+            return None
+        videos = video_recording.get('videos', []) or []
+        preferred_categories = self.config.get('fallback_video_categories', [
+            'video_insta360_raw_front',
+            'video_insta360_raw_back'
+        ])
+        for category in preferred_categories:
+            for video in videos:
+                if video.get('category') == category and video.get('uuid'):
+                    return video.get('uuid')
+        if videos:
+            return videos[0].get('uuid')
+        return None
+
+    def store_processed_video(self, stitched_path: Path, project_id: str, video_recording: Optional[Dict]) -> Optional[str]:
+        """Upload stitched video binary to API and return video UUID."""
+        if not stitched_path.exists():
+            logger.warning(f"Processed video not found at {stitched_path}")
+            return None
+        try:
+            with open(stitched_path, 'rb') as f:
+                video_binary = f.read()
+            video_type = self.config.get('processed_video_category', 'video_insta360_processed_stitched')
+            video_name = stitched_path.name
+            recording_id = video_recording.get('uuid') if video_recording else self.api_client.current_video_recording_id
+            video_id = self.api_client.store_video(
+                project_id=project_id,
+                video_type=video_type,
+                video_size=len(video_binary),
+                video_binary=video_binary,
+                recording_id=recording_id,
+                name=video_name
+            )
+            if video_id:
+                logger.info(f"Stored processed stitched video with ID {video_id}")
+            return video_id
+        except Exception as exc:
+            logger.error(f"Failed to store processed video: {exc}")
+            return None
+
     def handle_reset_task(self, task: Dict) -> bool:
         """Process a reset task by cleaning API data."""
         task_id = task.get('uuid')
@@ -228,6 +273,15 @@ class VideoProcessor:
             front_path, back_path = self.download_videos(task)
             if not front_path or not back_path:
                 raise Exception("Failed to download videos")
+
+            video_recording = self.api_client.fetch_video_recording(self.api_client.current_video_recording_id)
+            if not video_recording:
+                raise Exception("Failed to reload video recording data")
+            project_id = video_recording.get('project')
+            if not project_id:
+                raise Exception("Video recording missing project reference")
+            if video_recording.get('blur_people') is not None:
+                self.blur_people = bool(video_recording.get('blur_people'))
             
             # Step 4: Stitch videos
             stitched_path = self.work_dir / "stitched_output.mp4"
@@ -239,6 +293,15 @@ class VideoProcessor:
             ):
                 raise Exception("Failed to stitch videos")
             
+            stitched_video_id = None
+            if project_id:
+                stitched_video_id = self.store_processed_video(stitched_path, project_id, video_recording)
+            if not stitched_video_id:
+                stitched_video_id = self._select_fallback_video_id(video_recording)
+            if not stitched_video_id:
+                raise Exception("Failed to determine target video_id for frames")
+            self.processed_video_id = stitched_video_id
+
             # Step 5: Create and select frames (12fps high and low res, select sharpest)
             selected_high, selected_low = self.frame_processing.create_and_select_frames(
                 stitched_path,
@@ -257,12 +320,10 @@ class VideoProcessor:
             
             # Step 7: Upload frames to cloud
             # Get project_id from video_recording
-            video_recording = self.api_client.fetch_video_recording(self.api_client.current_video_recording_id)
-            project_id = video_recording.get('project') if video_recording else None
             frame_objects = self.upload_frames_to_cloud(
                 final_high + final_low,
                 project_id=project_id,
-                video_id=self.api_client.current_video_recording_id
+                video_id=stitched_video_id
             )
             
             # Step 8: Use 12fps low res frames for route calculation
@@ -308,33 +369,52 @@ class VideoProcessor:
             self.clean_local_directories()
             return False
     
-    def run(self, reset: bool = False):
+    def run(self, reset: bool = False, test_mode: bool = False):
         """Main loop: poll for tasks and process them."""
         logger.info("Starting video processor...")
+        if test_mode:
+            logger.info("Running in TEST mode (single iteration, reset=true)")
+        elif reset:
+            logger.info("Running in RESET mode")
         logger.info(f"Polling interval: {self.polling_interval} seconds")
-        
+
+        effective_reset = reset or test_mode
+
+        if test_mode:
+            if not self.test_task_uuid:
+                logger.error("Test mode requested but config.json missing test_task_uuid")
+                return
+            if self.api_client.set_task_status(self.test_task_uuid, 'pending'):
+                logger.info(f"Test task {self.test_task_uuid} reset to pending")
+            else:
+                logger.warning(f"Failed to reset test task {self.test_task_uuid} to pending")
+
         while True:
             try:
-                # Step 1: Fetch next task
-                task = self.api_client.fetch_next_task(reset=reset)
+                task = self.api_client.fetch_next_task(reset=effective_reset)
                 task_id = task.get('uuid') if task else None
                 if task and task_id:
                     logger.info(f"Found task: {task_id}")
-                    if reset:
+                    if effective_reset:
                         self.handle_reset_task(task)
                     else:
                         self.process_task(task)
                 else:
                     logger.debug("No tasks available, waiting...")
-                
-                # Wait before next poll
+
+                if test_mode:
+                    logger.info("Test mode complete, exiting loop")
+                    break
+
                 time.sleep(self.polling_interval)
-                
+
             except KeyboardInterrupt:
                 logger.info("Shutting down...")
                 break
             except Exception as e:
                 logger.error(f"Unexpected error in main loop: {e}")
+                if test_mode:
+                    break
                 time.sleep(self.polling_interval)
 
 
@@ -347,7 +427,12 @@ if __name__ == "__main__":
         action='store_true',
         help='Run in reset mode (cleanup API objects instead of processing)'
     )
+    parser.add_argument(
+        '--test',
+        action='store_true',
+        help='Run single-iteration test (reset=true, uses config.test_task_uuid)'
+    )
     args = parser.parse_args()
 
     processor = VideoProcessor()
-    processor.run(reset=args.reset)
+    processor.run(reset=args.reset, test_mode=args.test)

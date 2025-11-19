@@ -6,6 +6,7 @@ Fetches tasks from API, processes videos, and reports results.
 import json
 import time
 import logging
+import shutil
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
@@ -78,6 +79,22 @@ class VideoProcessor:
         if self.api_client.current_task_id:
             self.update_status_text("Siivotaan paikalliset hakemistot...")
         self.file_ops.clean_local_directories()
+        
+        # Also clean stella_results directory if it exists
+        stella_results_path = self.config.get('stella_results_path')
+        if stella_results_path:
+            try:
+                stella_results_dir = Path(stella_results_path)
+                # Handle relative paths (e.g., ./work/stella_results)
+                if not stella_results_dir.is_absolute():
+                    stella_results_dir = self.work_dir / stella_results_dir
+                
+                if stella_results_dir.exists():
+                    logger.info(f"Cleaning stella_results directory: {stella_results_dir}")
+                    shutil.rmtree(stella_results_dir)
+                    logger.info("Stella results directory cleaned")
+            except Exception as e:
+                logger.warning(f"Failed to clean stella_results directory: {e}")
     
     def download_videos(self, task: Dict) -> tuple[Optional[Path], Optional[Path]]:
         """Download front and back videos from video-recording data."""

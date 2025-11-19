@@ -218,6 +218,19 @@ class RouteCalculation:
         if map_output_path.exists():
             map_output_path.unlink()
         
+        # Ensure stella_results_path directory exists
+        if self.stella_results_path:
+            stella_results_dir = Path(self.stella_results_path)
+            # Handle relative paths (e.g., ./work/stella_results)
+            if not stella_results_dir.is_absolute():
+                stella_results_dir = self.work_dir / stella_results_dir
+            stella_results_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Ensured stella_results directory exists: {stella_results_dir}")
+            # Use absolute path for Stella command
+            stella_results_path_abs = str(stella_results_dir.resolve())
+        else:
+            stella_results_path_abs = ""
+        
         cmd = [
             self.stella_exec,
             '-c', self.stella_config_path,
@@ -226,9 +239,12 @@ class RouteCalculation:
             '--no-sleep',
             '--auto-term',
             '--map-db-out', str(map_output_path),
-            '--eval-log-dir', self.stella_results_path,
             '-v', self.stella_vocab_path
         ]
+        
+        # Add --eval-log-dir only if path is set
+        if stella_results_path_abs:
+            cmd.extend(['--eval-log-dir', stella_results_path_abs])
         
         logger.info(f"Running Stella VSLAM command: {' '.join(cmd)}")
         try:
@@ -276,8 +292,13 @@ class RouteCalculation:
             
             # Try 3: Read from frame_trajectory.txt in STELLA_RESULTS_PATH
             if not stella_data.get("frame_trajectory") and self.stella_results_path:
-                frame_trajectory_path = Path(self.stella_results_path) / "frame_trajectory.txt"
-                keyframe_trajectory_path = Path(self.stella_results_path) / "keyframe_trajectory.txt"
+                # Handle relative paths (e.g., ./work/stella_results)
+                stella_results_dir = Path(self.stella_results_path)
+                if not stella_results_dir.is_absolute():
+                    stella_results_dir = self.work_dir / stella_results_dir
+                
+                frame_trajectory_path = stella_results_dir / "frame_trajectory.txt"
+                keyframe_trajectory_path = stella_results_dir / "keyframe_trajectory.txt"
                 
                 # Try frame_trajectory.txt first
                 if frame_trajectory_path.exists():

@@ -417,6 +417,20 @@ class APIClient:
             json={'raw_path': raw_path}
         )
         return result is not None
+    
+    def reset_video_recording_status(self, video_recording_id: str, status: str = 'created') -> bool:
+        """Reset video-recording status (used in test mode to avoid cascade deletion)."""
+        if not video_recording_id:
+            logger.warning("Cannot reset video-recording status: missing video_recording_id")
+            return False
+        
+        logger.info(f"Resetting video-recording {video_recording_id} status to {status}...")
+        result = self._api_request(
+            'PATCH',
+            f'/api/v1/video-recording/{video_recording_id}',
+            json={'status': status}
+        )
+        return result is not None
 
     def set_task_status(self, task_id: str, status: str, status_text: Optional[str] = None) -> bool:
         """Patch process-recording-task status (used for test/reset)."""

@@ -157,7 +157,7 @@ class VideoProcessor:
                 success = False
         return success
 
-    def cleanup_video_recording_data(self, video_recording_id: str) -> bool:
+    def cleanup_video_recording_data(self, video_recording_id: str, test_mode: bool = False) -> bool:
         """Delete videos, frames, and images associated with a video-recording."""
         video_recording = self.api_client.fetch_video_recording(video_recording_id)
         if not video_recording:
@@ -182,9 +182,17 @@ class VideoProcessor:
                 self.update_status_text(f"Reset: poistetaan video {video_id}")
                 self.api_client.delete_video(video_id)
 
-        self.update_status_text("Reset: poistetaan video-recording")
-        self.api_client.delete_video_recording(video_recording_id)
-        logger.info(f"Reset cleanup finished for video-recording {video_recording_id}")
+        if test_mode:
+            # In test mode, reset status instead of deleting to avoid cascade deletion of process-recording-task
+            self.update_status_text("Reset: resetoidaan video-recording status")
+            reset_status = self.config.get('test_video_recording_reset_status', 'created')
+            self.api_client.reset_video_recording_status(video_recording_id, status=reset_status)
+            logger.info(f"Reset cleanup finished for video-recording {video_recording_id} (status reset to {reset_status})")
+        else:
+            # In normal reset mode, delete the video-recording
+            self.update_status_text("Reset: poistetaan video-recording")
+            self.api_client.delete_video_recording(video_recording_id)
+            logger.info(f"Reset cleanup finished for video-recording {video_recording_id}")
         return True
 
     def _select_fallback_video_id(self, video_recording: Optional[Dict]) -> Optional[str]:
@@ -242,7 +250,7 @@ class VideoProcessor:
             return False
 
         self.update_status_text("Reset: aloitetaan video-recordingin siivous")
-        success = self.cleanup_video_recording_data(video_recording_id)
+        success = self.cleanup_video_recording_data(video_recording_id, test_mode=test_mode)
         if success:
             self.update_status_text("Reset: siivous valmis")
             if not test_mode:

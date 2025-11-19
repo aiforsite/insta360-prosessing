@@ -377,7 +377,7 @@ class FrameProcessing:
             update_status_callback(f"Virhe frame blurrauksessa: {str(e)}")
             return high_frames, low_frames
     
-    def upload_frames_to_cloud(self, frame_paths: List[Path], project_id: str, video_id: Optional[str], api_client, update_status_callback) -> List[Dict]:
+    def upload_frames_to_cloud(self, frame_paths: List[Path], project_id: str, video_id: Optional[str], api_client, update_status_callback, layer_id: Optional[str] = None) -> List[Dict]:
         """Save frames to cloud and create frame objects."""
         logger.info("Uploading frames to cloud...")
         update_status_callback(f"Tallennetaan {len(frame_paths)} framea pilveen ja luodaan frame objektit...")
@@ -460,13 +460,14 @@ class FrameProcessing:
                 project_id,
                 video_id,
                 api_client,
-                update_status_callback
+                update_status_callback,
+                layer_id=layer_id
             )
             logger.info(f"Created {len(video_frame_ids)} video frame records")
         
         return frame_objects
     
-    def store_video_frames(self, frame_collections: Dict[int, Dict[str, Optional[str]]], project_id: str, video_id: str, api_client, update_status_callback) -> List[str]:
+    def store_video_frames(self, frame_collections: Dict[int, Dict[str, Optional[str]]], project_id: str, video_id: str, api_client, update_status_callback, layer_id: Optional[str] = None) -> List[str]:
         """Create video frame objects in API using uploaded image references."""
         saved_frame_ids: List[str] = []
         if not frame_collections:
@@ -497,6 +498,7 @@ class FrameProcessing:
                 print(f"  low_id: {low_id}")
                 print(f"  blur_high_id: {blur_high_id}")
                 print(f"  blur_low_id: {blur_low_id}")
+                print(f"  layer_id: {layer_id}")
                 print(f"  All images in collection: {images}")
             
             frame_uuid = api_client.save_videoframe(
@@ -506,7 +508,8 @@ class FrameProcessing:
                 high_res_image_id=high_id,
                 low_res_image_id=low_id,
                 blur_high_image_id=blur_high_id,
-                blur_low_image_id=blur_low_id
+                blur_low_image_id=blur_low_id,
+                layer_id=layer_id
             )
             
             if frame_uuid:

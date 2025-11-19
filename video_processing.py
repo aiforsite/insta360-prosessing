@@ -95,6 +95,8 @@ class VideoProcessing:
                 '-output', str(output_path),
                 '-stitch_type', 'aistitch',
                 '-ai_stitching_model', f'{self.media_model_dir}/ai_stitcher_v2.ins',
+                "-enable_flowstate",
+                "-enable_directionlock",
                 '-output_size', '5760x2880',
                 '-disable_cuda', 'false'
             ]

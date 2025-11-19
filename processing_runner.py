@@ -117,7 +117,7 @@ class VideoProcessor:
             self.update_status_text
         )
     
-    def upload_frames_to_cloud(self, frame_paths: list[Path], project_id: Optional[str] = None, video_id: Optional[str] = None) -> list[Dict]:
+    def upload_frames_to_cloud(self, frame_paths: list[Path], project_id: Optional[str] = None, video_id: Optional[str] = None, layer_id: Optional[str] = None) -> list[Dict]:
         """Save frames to cloud and create frame objects."""
         if not project_id:
             # Try to get project_id from video_recording if available
@@ -125,6 +125,8 @@ class VideoProcessor:
                 video_recording = self.api_client.fetch_video_recording(self.api_client.current_video_recording_id)
                 if video_recording:
                     project_id = video_recording.get('project')
+                    if not layer_id:
+                        layer_id = video_recording.get('layer')
         
         if not project_id:
             logger.error("No project_id available for frame upload")
@@ -136,7 +138,8 @@ class VideoProcessor:
             project_id,
             video_id,
             self.api_client,
-            self.update_status_text
+            self.update_status_text,
+            layer_id=layer_id
         )
     
     def get_route_frames_from_low_res(self, low_frames: list[Path]) -> list[Path]:
@@ -356,11 +359,13 @@ class VideoProcessor:
             )
             
             # Step 7: Upload frames to cloud
-            # Get project_id from video_recording
+            # Get project_id and layer from video_recording
+            layer_id = video_recording.get('layer')
             frame_objects = self.upload_frames_to_cloud(
                 final_high + final_low,
                 project_id=project_id,
-                video_id=stitched_video_id
+                video_id=stitched_video_id,
+                layer_id=layer_id
             )
             
             # Step 8: Use 12fps low res frames for route calculation

@@ -418,6 +418,27 @@ class APIClient:
         )
         return result is not None
     
+    def update_video_recording_video(self, video_recording_id: str, video_uuid: str) -> bool:
+        """Update video-recording with processed video UUID."""
+        if not video_recording_id:
+            logger.warning("Cannot update video-recording video: missing video_recording_id")
+            return False
+        if not video_uuid:
+            logger.warning("Cannot update video-recording video: missing video_uuid")
+            return False
+        
+        logger.info(f"Updating video-recording {video_recording_id} with video {video_uuid}...")
+        result = self._api_request(
+            'PATCH',
+            f'/api/v1/video-recording/{video_recording_id}',
+            json={'video': video_uuid}
+        )
+        if result:
+            logger.info(f"Video-recording {video_recording_id} updated with video {video_uuid}")
+        else:
+            logger.warning(f"Failed to update video-recording {video_recording_id} with video {video_uuid}")
+        return result is not None
+    
     def reset_video_recording_status(self, video_recording_id: str, status: str = 'created') -> bool:
         """Reset video-recording status (used in test mode to avoid cascade deletion)."""
         if not video_recording_id:

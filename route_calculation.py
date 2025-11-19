@@ -46,12 +46,16 @@ class RouteCalculation:
         try:
             with open(map_output_path, 'r', encoding='utf-8') as f:
                 lines = [line.strip() for line in f if line.strip()]
+                # Remove null characters from lines
+                lines = [line.replace('\u0000', '').replace('\x00', '') for line in lines]
                 return lines
         except UnicodeDecodeError:
             try:
                 with open(map_output_path, 'rb') as f:
                     content = f.read().decode('utf-8', errors='ignore')
                     lines = [line.strip() for line in content.splitlines() if line.strip()]
+                    # Remove null characters from lines
+                    lines = [line.replace('\u0000', '').replace('\x00', '') for line in lines]
             except Exception as exc:
                 logger.warning(f"Failed to parse map file {map_output_path}: {exc}")
         except Exception as exc:
@@ -88,6 +92,9 @@ class RouteCalculation:
                 line = route_lines[idx]
             if line is None:
                 line = ""
+            # Remove null characters (\u0000) that cause PostgreSQL text field errors
+            # Replace with empty string or space as needed
+            line = line.replace('\u0000', '').replace('\x00', '')
             raw_path[str(idx)] = [time_in_video, line]
         return raw_path
     

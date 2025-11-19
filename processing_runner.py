@@ -319,6 +319,14 @@ class VideoProcessor:
             if not stitched_video_id:
                 raise Exception("Failed to determine target video_id for frames")
             self.processed_video_id = stitched_video_id
+            
+            # Update video-recording with processed video UUID
+            if video_recording and video_recording.get('uuid'):
+                video_recording_id = video_recording.get('uuid')
+                if self.api_client.update_video_recording_video(video_recording_id, stitched_video_id):
+                    logger.info(f"Updated video-recording {video_recording_id} with video {stitched_video_id}")
+                else:
+                    logger.warning(f"Failed to update video-recording {video_recording_id} with video {stitched_video_id}")
 
             # Step 5: Create and select frames (12fps high and low res, select sharpest)
             selected_high, selected_low = self.frame_processing.create_and_select_frames(

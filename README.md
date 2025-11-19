@@ -20,6 +20,7 @@ This project contains a video processing script that:
 - Python 3.8+
 - FFmpeg (for video processing)
 - API access to the target system
+- PyTorch + TorchVision (for GPU-accelerated blur, optional but recommended)
 
 ### Installation
 
@@ -33,30 +34,13 @@ pip install -r requirements.txt
    - Linux: `sudo apt-get install ffmpeg`
    - macOS: `brew install ffmpeg`
 
-3. Configure the environment:
-   - Copy `.env.example` to `.env`
-   - Edit `.env` and set:
-     - `API_DOMAIN`: Your API domain URL
-     - `API_KEY`: Your API authentication key
-     - `MEDIA_MODEL_DIR`: Path to MediaSDK model directory (e.g., `/path/to/models`)
-     - `STELLA_EXECUTABLE`: Path to `run_image_slam` binary
-     - `STELLA_CONFIG_PATH`: Path to `insta360_equirect.yaml`
-     - `STELLA_VOCAB_PATH`: Path to `orb_vocab.fbow`
+3. Configure `config.json`:
+   - Set API credentials (`api_domain`, `api_key`)
+   - Set MediaSDK model directory (`media_model_dir`)
+   - Set Stella VSLAM paths (`stella_executable`, `stella_config_path`, `stella_vocab_path`)
+   - Adjust processing parameters as needed (polling interval, FPS, etc.)
 
 ## Configuration
-
-### Environment Variables (.env)
-
-Create a `.env` file in the project root:
-
-```env
-API_DOMAIN=https://your-api-domain.com
-API_KEY=your-api-key-here
-MEDIA_MODEL_DIR=/path/to/media/model/directory
-STELLA_EXECUTABLE=/root/lib/stella_vslam_examples/build/run_image_slam
-STELLA_CONFIG_PATH=/opt/stella_vslam/insta360_equirect.yaml
-STELLA_VOCAB_PATH=/opt/stella_vslam/orb_vocab.fbow
-```
 
 ### Application Configuration (config.json)
 
@@ -64,23 +48,49 @@ Edit `config.json` to configure processing parameters:
 
 ```json
 {
+  "api_domain": "https://your-api-domain.com",
+  "api_key": "your-api-key-here",
+  "media_model_dir": "/path/to/media/model/directory",
+  "stella_executable": "/root/lib/stella_vslam_examples/build/run_image_slam",
+  "stella_config_path": "/opt/stella_vslam/insta360_equirect.yaml",
+  "stella_vocab_path": "/opt/stella_vslam/orb_vocab.fbow",
   "polling_interval": 15,
   "local_work_dir": "./work",
   "frames_per_second": 12,
   "low_res_frames_per_second": 1,
+  "candidates_per_second": 12,
   "route_calculation_fps": {
     "min": 1,
     "max": 4
   },
-  "video_deletion_grace_period_days": 30
+  "video_deletion_grace_period_days": 30,
+  "blur_settings": {
+    "enable_gpu": true,
+    "confidence_threshold": 0.7,
+    "min_box_area": 2500,
+    "blur_radius": 18,
+    "fallback_full_frame": true
+  }
 }
+
+#### Blur Settings
+
+- `enable_gpu`: Toggle GPU-accelerated person detection (requires PyTorch + TorchVision).
+- `confidence_threshold`: Minimum detection confidence (0–1) to treat a box as a person.
+- `min_box_area`: Ignore detections smaller than this pixel area (filters out noise).
+- `blur_radius`: Gaussian blur radius applied to each bounding box.
+- `fallback_full_frame`: When `true`, fall back to full-frame blur if no people are detected or the detector is unavailable.
 ```
+
+> **Security note:** `config.json` now contains API keys and other secrets. Keep it out of version control or manage environment-specific copies securely.
 
 ## Usage
 
-### Testing API Integration
+### Testing
 
-Before running the full video processor, you can test API integration with a mockup test:
+#### Mockup Test (API Integration Only)
+
+Test API integration without actual video processing:
 
 ```bash
 python test_api_mockup.py
@@ -92,12 +102,44 @@ This will:
 - Test all API endpoints (status updates, route updates, completion, etc.)
 - Help verify API connectivity and endpoint correctness
 
+#### Component Tests (Using Real VideoProcessor Class)
+
+Test individual components using the actual VideoProcessor class:
+
+```bash
+python test_processing_runner.py
+```
+
+Or run component tests only:
+```bash
+python test_processing_runner.py --component
+```
+
+This will test:
+- API connection
+- Video recording data fetch
+- Image storage (`api_client.store_image`)
+- Video storage (`api_client.store_video`)
+- Video frame creation (`api_client.save_videoframe`)
+- Status updates
+- Sharpness calculation
+
+#### Full Task Processing Test
+
+Test the complete processing pipeline with real videos:
+
+```bash
+python test_processing_runner.py --full
+```
+
+**Warning**: This will process actual videos and may take a long time. Use with caution!
+
 ### Running the Full Video Processor
 
 Run the video processor:
 
 ```bash
-python video_processor.py
+python processing_runner.py
 ```
 
 The script will:
@@ -105,6 +147,20 @@ The script will:
 - Process each task through the complete pipeline
 - Report results back to the API
 - Clean up local files after processing
+
+#### Reset Mode
+
+Use reset mode to clean up API data (videos, frames, linked images) for queued tasks:
+
+```bash
+python processing_runner.py --reset
+```
+
+This will:
+- Fetch reset tasks via `?reset=true`
+- Delete all video frames and their associated images
+- Delete related video assets
+- Delete the video-recording entry after cleanup
 
 ## Processing Pipeline
 
@@ -156,7 +212,7 @@ The script reports progress to the API using the `status_text` field at each pro
 - Local work directory is cleaned before and after each task
 - Videos are marked for deletion 30 days after processing (configurable)
 - All API requests use Bearer token authentication
-- Environment variables (`MEDIA_MODEL_DIR`, `STELLA_EXECUTABLE`, `STELLA_CONFIG_PATH`, `STELLA_VOCAB_PATH`) must be set in `.env`
+- API credentials and tool paths are read from `config.json`
 
 ## Development
 

@@ -38,6 +38,7 @@ class VideoProcessor:
         stella_exec = self.config.get('stella_executable')
         stella_config_path = self.config.get('stella_config_path')
         stella_vocab_path = self.config.get('stella_vocab_path')
+        stella_results_path = self.config.get('stella_results_path')
         
         if not api_domain or not api_key:
             raise ValueError("api_domain and api_key must be set in config.json")
@@ -66,6 +67,7 @@ class VideoProcessor:
             stella_exec or '',
             stella_config_path or '',
             stella_vocab_path or '',
+            stella_results_path or '',
             self.candidates_per_second
         )
         self.processed_video_id: Optional[str] = None
@@ -230,13 +232,13 @@ class VideoProcessor:
                 video_binary = f.read()
             video_type = self.config.get('processed_video_category', 'video_insta360_processed_stitched')
             video_name = stitched_path.name
-            recording_id = video_recording.get('uuid') if video_recording else self.api_client.current_video_recording_id
+            video_recording_id = video_recording.get('uuid') if video_recording else self.api_client.current_video_recording_id
             video_id = self.api_client.store_video(
                 project_id=project_id,
+                video_recording_id=video_recording_id,
                 video_type=video_type,
                 video_size=len(video_binary),
                 video_binary=video_binary,
-                recording_id=recording_id,
                 name=video_name
             )
             if video_id:
@@ -320,14 +322,6 @@ class VideoProcessor:
                 raise Exception("Failed to determine target video_id for frames")
             self.processed_video_id = stitched_video_id
             
-            # Update video-recording with processed video UUID
-            if video_recording and video_recording.get('uuid'):
-                video_recording_id = video_recording.get('uuid')
-                if self.api_client.update_video_recording_video(video_recording_id, stitched_video_id):
-                    logger.info(f"Updated video-recording {video_recording_id} with video {stitched_video_id}")
-                else:
-                    logger.warning(f"Failed to update video-recording {video_recording_id} with video {stitched_video_id}")
-
             # Step 5: Create and select frames (12fps high and low res, select sharpest)
             selected_high, selected_low = self.frame_processing.create_and_select_frames(
                 stitched_path,

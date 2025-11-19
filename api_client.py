@@ -286,12 +286,13 @@ class APIClient:
         """
         try:
             logger.info(f"Saving video frame (video: {video_id}, time: {time_in_video}s)...")
+            # API expects 'high_image' and 'image' (not 'high_res_image' and 'low_res_image')
             payload = {
                 'project': project_id,
                 'video': video_id,
                 'time_in_video': time_in_video,
-                'high_res_image': high_res_image_id,
-                'low_res_image': low_res_image_id
+                'high_image': high_res_image_id,
+                'image': low_res_image_id
             }
             
             if blur_high_image_id:
@@ -331,14 +332,14 @@ class APIClient:
                 print(json_module.dumps(response, indent=2))
                 print("=" * 60)
                 
-                # Check for missing image fields (API returns different field names)
+                # Check for missing image fields
                 missing_images = []
-                # API returns 'high_image' for 'high_res_image' we sent
+                # We send 'high_image' and API should return it
                 if not response.get('high_image'):
-                    missing_images.append('high_image (from high_res_image)')
-                # API returns 'image' for 'low_res_image' we sent
+                    missing_images.append('high_image')
+                # We send 'image' and API should return it
                 if not response.get('image'):
-                    missing_images.append('image (from low_res_image)')
+                    missing_images.append('image')
                 if blur_high_image_id and not response.get('blur_high_image'):
                     missing_images.append('blur_high_image')
                 if blur_low_image_id and not response.get('blur_image'):
@@ -346,8 +347,9 @@ class APIClient:
                 
                 if missing_images:
                     print(f"⚠️  WARNING: Missing image fields: {', '.join(missing_images)}")
-                    print(f"   Sent: high_res_image_id={high_res_image_id}, low_res_image_id={low_res_image_id}")
-                    print(f"   Sent: blur_high_image_id={blur_high_image_id}, blur_low_image_id={blur_low_image_id}")
+                    print(f"   Sent: high_image={high_res_image_id}, image={low_res_image_id}")
+                    print(f"   Sent: blur_high_image={blur_high_image_id}, blur_image={blur_low_image_id}")
+                    print(f"   Payload sent: {json_module.dumps(payload, indent=2)}")
                     print("=" * 60)
             
             logger.info(f"Video frame saved successfully with ID: {frame_uuid}")

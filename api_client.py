@@ -22,6 +22,7 @@ class APIClient:
         }
         self.current_task_id = None
         self.current_video_recording_id = None
+        self.test_mode = False
     
     def _api_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict]:
         """Make API request with error handling."""
@@ -314,6 +315,32 @@ class APIClient:
             if not frame_uuid:
                 logger.error("Missing uuid in API response")
                 return None
+            
+            # In test mode, print the full API response
+            if self.test_mode:
+                import json as json_module
+                print(f"\n=== VIDEO-FRAME API RESPONSE (time: {time_in_video}s) ===")
+                print(json_module.dumps(response, indent=2))
+                print("=" * 60)
+                
+                # Check for missing image fields (API returns different field names)
+                missing_images = []
+                # API returns 'high_image' for 'high_res_image' we sent
+                if not response.get('high_image'):
+                    missing_images.append('high_image (from high_res_image)')
+                # API returns 'image' for 'low_res_image' we sent
+                if not response.get('image'):
+                    missing_images.append('image (from low_res_image)')
+                if blur_high_image_id and not response.get('blur_high_image'):
+                    missing_images.append('blur_high_image')
+                if blur_low_image_id and not response.get('blur_image'):
+                    missing_images.append('blur_image')
+                
+                if missing_images:
+                    print(f"⚠️  WARNING: Missing image fields: {', '.join(missing_images)}")
+                    print(f"   Sent: high_res_image_id={high_res_image_id}, low_res_image_id={low_res_image_id}")
+                    print(f"   Sent: blur_high_image_id={blur_high_image_id}, blur_low_image_id={blur_low_image_id}")
+                    print("=" * 60)
             
             logger.info(f"Video frame saved successfully with ID: {frame_uuid}")
             return frame_uuid

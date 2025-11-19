@@ -408,6 +408,8 @@ class VideoProcessor:
         logger.info("Starting video processor...")
         if test_mode:
             logger.info("Running in TEST mode (reset + normal processing)")
+            # Enable test mode in API client for detailed logging
+            self.api_client.test_mode = True
         elif reset:
             logger.info("Running in RESET mode")
         logger.info(f"Polling interval: {self.polling_interval} seconds")

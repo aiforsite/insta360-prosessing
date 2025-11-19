@@ -230,7 +230,7 @@ class VideoProcessor:
             logger.error(f"Failed to store processed video: {exc}")
             return None
 
-    def handle_reset_task(self, task: Dict) -> bool:
+    def handle_reset_task(self, task: Dict, test_mode: bool = False) -> bool:
         """Process a reset task by cleaning API data."""
         task_id = task.get('uuid')
         video_recording_id = task.get('video_recording')
@@ -245,10 +245,12 @@ class VideoProcessor:
         success = self.cleanup_video_recording_data(video_recording_id)
         if success:
             self.update_status_text("Reset: siivous valmis")
-            self.api_client.report_task_completion(success=True)
+            if not test_mode:
+                self.api_client.report_task_completion(success=True)
         else:
             self.update_status_text("Reset: siivous epäonnistui")
-            self.api_client.report_task_completion(success=False, error="Reset cleanup failed")
+            if not test_mode:
+                self.api_client.report_task_completion(success=False, error="Reset cleanup failed")
         return success
     
     def calculate_route(self, frame_paths: list[Path]) -> Optional[Dict]:
@@ -334,14 +336,11 @@ class VideoProcessor:
             if route_data:
                 raw_path = route_data.get('raw_path')
                 if raw_path:
-                    updated = False
-                    if self.api_client.current_video_recording_id:
-                        updated = self.api_client.update_video_raw_path(
-                            self.api_client.current_video_recording_id,
-                            raw_path
-                        )
-                    if not updated:
-                        self.api_client.update_task_route(raw_path)
+                    # Update raw_path to the stitched video
+                    if self.processed_video_id:
+                        self.api_client.update_task_route(self.processed_video_id, raw_path)
+                    else:
+                        logger.warning("Cannot update raw_path: processed video ID not available")
                 else:
                     logger.warning("Route data returned without raw_path information")
             
@@ -396,7 +395,7 @@ class VideoProcessor:
                 if task and task_id:
                     logger.info(f"Found task: {task_id}")
                     if effective_reset:
-                        self.handle_reset_task(task)
+                        self.handle_reset_task(task, test_mode=test_mode)
                     else:
                         self.process_task(task)
                 else:

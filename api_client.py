@@ -390,16 +390,16 @@ class APIClient:
         logger.info(f"Deleted video-recording {video_recording_id}")
         return True
     
-    def update_task_route(self, raw_path: Dict) -> bool:
-        """Update process-recording-task with raw_path data."""
-        if not self.current_task_id:
-            logger.warning("Cannot update route: no current task ID")
+    def update_task_route(self, video_uuid: str, raw_path: Dict) -> bool:
+        """Update stitched video with raw_path data."""
+        if not video_uuid:
+            logger.warning("Cannot update route: missing video UUID")
             return False
         
-        logger.info("Updating task with route data...")
+        logger.info(f"Updating video {video_uuid} with raw_path data...")
         result = self._api_request(
             'PATCH',
-            f'/api/v1/process-recording-task/{self.current_task_id}/route',
+            f'/api/v1/video/{video_uuid}/',
             json={'raw_path': raw_path}
         )
         return result is not None

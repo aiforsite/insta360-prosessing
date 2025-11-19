@@ -307,9 +307,9 @@ class APIClient:
                     "ry": 0,
                     "rz": 0,
                     "layer": layer_id,
-                    "yaw": None,
-                    "roll": None,
-                    "pitch": None,
+                    #"yaw": 0,
+                    #"roll": 0,
+                    #"pitch": 0,
                 }
             
             response = self._api_request(

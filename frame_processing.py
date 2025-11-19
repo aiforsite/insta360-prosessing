@@ -432,12 +432,27 @@ class FrameProcessing:
                 suffix = self._extract_suffix(frame_path)
                 if suffix is not None and image_id:
                     frame_collections[suffix][image_type] = image_id
+                    # Log in test mode
+                    if hasattr(api_client, 'test_mode') and api_client.test_mode:
+                        print(f"  Stored {image_type} image for suffix {suffix}: {image_id}")
+                elif suffix is None:
+                    logger.warning(f"Could not extract suffix from {frame_path}")
+                elif not image_id:
+                    logger.warning(f"Image ID is None for {frame_path}")
                     
             except Exception as e:
                 logger.error(f"Failed to upload frame {i}: {e}")
         
         logger.info(f"Uploaded {len(frame_objects)} frames")
         update_status_callback(f"Tallennettu {len(frame_objects)} framea pilveen")
+        
+        # In test mode, print summary of frame collections
+        if hasattr(api_client, 'test_mode') and api_client.test_mode:
+            print(f"\n=== FRAME COLLECTIONS SUMMARY ===")
+            for suffix, images in sorted(frame_collections.items()):
+                if any(images.values()):  # Only print if there are any images
+                    print(f"  Suffix {suffix}: {images}")
+            print("=" * 60)
         
         if video_id:
             video_frame_ids = self.store_video_frames(
@@ -469,10 +484,21 @@ class FrameProcessing:
             blur_low_id = images.get('blurred_low')
             
             if not high_id or not low_id:
-                logger.debug(f"Skipping suffix {suffix}: missing high/low images")
+                logger.warning(f"Skipping suffix {suffix}: missing high/low images")
+                logger.warning(f"  Available images: {images}")
                 continue
             
             time_in_video = suffix / float(self.candidates_per_second)
+            
+            # Log image IDs being used (especially in test mode)
+            if hasattr(api_client, 'test_mode') and api_client.test_mode:
+                print(f"\n--- Creating video-frame for suffix {suffix} (time: {time_in_video}s) ---")
+                print(f"  high_id: {high_id}")
+                print(f"  low_id: {low_id}")
+                print(f"  blur_high_id: {blur_high_id}")
+                print(f"  blur_low_id: {blur_low_id}")
+                print(f"  All images in collection: {images}")
+            
             frame_uuid = api_client.save_videoframe(
                 project_id=project_id,
                 video_id=video_id,

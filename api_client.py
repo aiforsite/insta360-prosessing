@@ -3,6 +3,7 @@ API client module for handling all API requests.
 """
 
 import logging
+import math
 import requests
 from typing import Dict, Optional, List
 
@@ -290,7 +291,7 @@ class APIClient:
             payload = {
                 'project': project_id,
                 'video': video_id,
-                'time_in_video': time_in_video,
+                'time_in_video': math.floor(time_in_video),
                 'high_image': high_res_image_id,
                 'image': low_res_image_id
             }
@@ -304,10 +305,11 @@ class APIClient:
                 payload['camera_layer_position'] = {
                     "rx": 0,
                     "ry": 0,
+                    "rz": 0,
                     "layer": layer_id,
-                    "yaw": 0,
-                    "roll": 0,
-                    "pitch": 0,
+                    "yaw": None,
+                    "roll": None,
+                    "pitch": None,
                 }
             
             response = self._api_request(

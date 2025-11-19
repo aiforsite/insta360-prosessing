@@ -166,9 +166,17 @@ class VideoProcessor:
 
         videos = video_recording.get('videos', [])
         targets: List[Tuple[str, bool]] = []
+        # Categories to preserve (front and back raw videos)
+        preserve_categories = [
+            'video_insta360_raw_front',
+            'video_insta360_raw_back'
+        ]
+        
         for video in videos:
             video_uuid = video.get('uuid')
-            if video_uuid:
+            category = video.get('category')
+            # Skip front and back raw videos - don't delete them
+            if video_uuid and category not in preserve_categories:
                 targets.append((video_uuid, True))
         # Frame entries may reference video_recording_id directly
         targets.append((video_recording_id, False))

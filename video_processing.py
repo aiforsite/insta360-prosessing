@@ -93,14 +93,13 @@ class VideoProcessing:
                 '-inputs', str(front_path),
                 '-inputs', str(back_path),
                 '-output', str(output_path),
-                #'-stitch_type', 'aistitch',
-                # '-ai_stitching_model', f'{self.media_model_dir}/ai_stitcher_v2.ins',
+                '-stitch_type', 'aistitch',
+                 '-ai_stitching_model', f'{self.media_model_dir}/ai_stitcher_v2.ins',
                 "-enable_flowstate",
                 "-enable_directionlock",
                 '-output_size', '5760x2880',
                 '-disable_cuda', 'false'
             ]
-            
             logger.info(f"Running MediaSDKTest: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
@@ -113,6 +112,23 @@ class VideoProcessing:
                 logger.info(f"MediaSDKTest output: {result.stdout}")
             if result.stderr:
                 logger.warning(f"MediaSDKTest stderr: {result.stderr}")
+                
+                # Check if CUDA/GPU is not being used
+                stderr_lower = result.stderr.lower()
+                cuda_warnings = [
+                    'cudacontext null',
+                    'cuda context null',
+                    'cuda not available',
+                    'gpu not available',
+                    'no cuda device',
+                    'cuda initialization failed'
+                ]
+                
+                cuda_not_used = any(warning in stderr_lower for warning in cuda_warnings)
+                if cuda_not_used:
+                    logger.warning("⚠️  CUDA/GPU is not being used for stitching! Stitching may be slower or incorrect.")
+                    logger.warning("   Check GPU drivers, CUDA installation, and MediaSDKTest configuration.")
+                    update_status_callback("Varoitus: GPU ei ole käytössä stitchauksessa")
             
             logger.info(f"Videos stitched to {output_path}")
             update_status_callback("Stitchaus valmis")
@@ -123,6 +139,23 @@ class VideoProcessing:
                 logger.error(f"stdout: {e.stdout}")
             if e.stderr:
                 logger.error(f"stderr: {e.stderr}")
+                
+                # Check if CUDA/GPU is not being used
+                stderr_lower = e.stderr.lower() if e.stderr else ""
+                cuda_warnings = [
+                    'cudacontext null',
+                    'cuda context null',
+                    'cuda not available',
+                    'gpu not available',
+                    'no cuda device',
+                    'cuda initialization failed'
+                ]
+                
+                cuda_not_used = any(warning in stderr_lower for warning in cuda_warnings)
+                if cuda_not_used:
+                    logger.warning("⚠️  CUDA/GPU is not being used for stitching! This may be causing the failure.")
+                    logger.warning("   Check GPU drivers, CUDA installation, and MediaSDKTest configuration.")
+            
             update_status_callback(f"Virhe stitchauksessa: {e.stderr or str(e)}")
             return False
         except Exception as e:

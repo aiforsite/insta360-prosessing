@@ -380,12 +380,10 @@ class VideoProcessor:
         """Main loop: poll for tasks and process them."""
         logger.info("Starting video processor...")
         if test_mode:
-            logger.info("Running in TEST mode (single iteration, reset=true)")
+            logger.info("Running in TEST mode (reset + normal processing)")
         elif reset:
             logger.info("Running in RESET mode")
         logger.info(f"Polling interval: {self.polling_interval} seconds")
-
-        effective_reset = reset or test_mode
 
         if test_mode:
             if not self.test_task_uuid:
@@ -396,6 +394,35 @@ class VideoProcessor:
             else:
                 logger.warning(f"Failed to reset test task {self.test_task_uuid} to pending")
 
+            # Test mode: first do reset, then normal processing
+            logger.info("Test mode: Step 1 - Resetting and cleaning data...")
+            task = self.api_client.fetch_next_task(reset=True)
+            task_id = task.get('uuid') if task else None
+            if task and task_id:
+                logger.info(f"Found reset task: {task_id}")
+                self.handle_reset_task(task, test_mode=test_mode)
+                logger.info("Reset complete, waiting briefly before fetching task for processing...")
+                time.sleep(2)  # Brief pause to ensure API state is updated
+            else:
+                logger.warning("No reset task found in test mode")
+            
+            # Step 2: Fetch task again and do normal processing
+            logger.info("Test mode: Step 2 - Processing task normally...")
+            task = self.api_client.fetch_next_task(reset=False)
+            task_id = task.get('uuid') if task else None
+            if task and task_id:
+                logger.info(f"Found processing task: {task_id}")
+                self.process_task(task)
+                # Ensure completion status is set
+                logger.info("Test mode: Setting completion status...")
+                self.api_client.report_task_completion(success=True)
+                logger.info("Test mode complete (reset + processing done)")
+            else:
+                logger.warning("No processing task found in test mode")
+            return
+
+        # Normal mode: continue with regular loop
+        effective_reset = reset
         while True:
             try:
                 task = self.api_client.fetch_next_task(reset=effective_reset)
@@ -403,14 +430,13 @@ class VideoProcessor:
                 if task and task_id:
                     logger.info(f"Found task: {task_id}")
                     if effective_reset:
-                        self.handle_reset_task(task, test_mode=test_mode)
+                        self.handle_reset_task(task, test_mode=False)
                     else:
                         self.process_task(task)
                 else:
                     logger.debug("No tasks available, waiting...")
 
                 if test_mode:
-                    logger.info("Test mode complete, exiting loop")
                     break
 
                 time.sleep(self.polling_interval)

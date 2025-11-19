@@ -104,14 +104,26 @@ class VideoProcessing:
             
             # Aseta LD_LIBRARY_PATH varmistaaksesi, että CUDA 11.x kirjastot löytyvät
             cuda11_lib_path = '/usr/local/cuda-11/targets/x86_64-linux/lib'
-            current_ld_path = os.environ.get('LD_LIBRARY_PATH', '')
-            if cuda11_lib_path not in current_ld_path:
-                os.environ['LD_LIBRARY_PATH'] = f"{cuda11_lib_path}:{current_ld_path}" if current_ld_path else cuda11_lib_path
-                logger.info(f"Set LD_LIBRARY_PATH to include CUDA 11.x libraries: {cuda11_lib_path}")
             
             # Varmista, että subprocess käyttää päivitettyä ympäristöä
             env = os.environ.copy()
+            current_ld_path = env.get('LD_LIBRARY_PATH', '')
             
+            # Varmista, että CUDA 11.x polku on aina env:ssä
+            if cuda11_lib_path not in current_ld_path:
+                env['LD_LIBRARY_PATH'] = f"{cuda11_lib_path}:{current_ld_path}" if current_ld_path else cuda11_lib_path
+                logger.info(f"Set LD_LIBRARY_PATH to include CUDA 11.x libraries: {env['LD_LIBRARY_PATH']}")
+            else:
+                logger.info(f"LD_LIBRARY_PATH already contains CUDA 11.x path: {current_ld_path}")
+            
+            # Tarkista, että CUDA runtime-kirjasto löytyy
+            cudart_path = os.path.join(cuda11_lib_path, 'libcudart.so.11.0')
+            if os.path.exists(cudart_path):
+                logger.info(f"CUDA runtime library found at {cudart_path}")
+            else:
+                logger.warning(f"CUDA runtime library not found at {cudart_path}")
+            
+            logger.info(f"Running MediaSDKTest with LD_LIBRARY_PATH: {env.get('LD_LIBRARY_PATH', 'NOT SET')}")
             logger.info(f"Running MediaSDKTest: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,

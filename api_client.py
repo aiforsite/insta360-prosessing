@@ -507,19 +507,27 @@ class APIClient:
         )
         return result is not None
     
-    def report_task_completion(self, success: bool, error: Optional[str] = None):
+    def report_task_completion(self, success: bool, error: Optional[str] = None, waiting_for_route: bool = False):
         """Report task completion to API."""
         if not self.current_task_id:
             logger.warning("Cannot report completion: no current task ID")
             return
         
-        logger.info(f"Reporting task completion: success={success}")
+        logger.info(f"Reporting task completion: success={success}, waiting_for_route={waiting_for_route}")
         
-        # Update process-recording-task status to "completed"
+        # Determine status: if waiting for route, use "waiting_for_route_calculation", otherwise "completed" or "failed"
+        if success and waiting_for_route:
+            status = 'waiting_for_route_calculation'
+        elif success:
+            status = 'completed'
+        else:
+            status = 'failed'
+        
+        # Update process-recording-task status
         task_result = self._api_request(
             'PATCH',
             f'/api/v1/process-recording-task/{self.current_task_id}',
-            json={'status': 'completed' if success else 'failed'}
+            json={'status': status}
         )
         
         # Update video-recording status to "ready_to_view" (if success)
@@ -537,7 +545,7 @@ class APIClient:
             logger.info("Skipping video-recording status update due to failure")
         
         if task_result:
-            logger.info(f"Process-recording-task status updated: {'completed' if success else 'failed'}")
+            logger.info(f"Process-recording-task status updated: {status}")
         else:
             logger.warning("Failed to update process-recording-task status")
 

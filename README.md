@@ -36,8 +36,9 @@ pip install -r requirements.txt
 
 3. Configure `config.json`:
    - Set API credentials (`api_domain`, `api_key`)
-   - Set MediaSDK model directory (`media_model_dir`)
-   - Set Stella VSLAM paths (`stella_executable`, `stella_config_path`, `stella_vocab_path`)
+   - Set MediaSDK executable path (`mediasdk_executable`) - Windows path to MediaSDKTest.exe
+   - Set Stella VSLAM paths (`stella_executable`, `stella_config_path`, `stella_vocab_path`) - optional if `enable_stella` is false
+   - Set `enable_stella` to `true` or `false` to enable/disable route calculation
    - Adjust processing parameters as needed (polling interval, FPS, etc.)
 
 ## Configuration
@@ -49,6 +50,8 @@ Edit `config.json` to configure processing parameters:
 ```json
 {
   "api_domain": "https://your-api-domain.com",
+  "mediasdk_executable": "C:\\Users\\Administrator\\Documents\\insta360\\MediaSDK\\bin\\MediaSDKTest.exe",
+  "enable_stella": false,
   "api_key": "your-api-key-here",
   "media_model_dir": "/path/to/media/model/directory",
   "stella_executable": "/root/lib/stella_vslam_examples/build/run_image_slam",

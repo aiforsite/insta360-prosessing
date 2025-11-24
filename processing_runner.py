@@ -35,16 +35,17 @@ class VideoProcessor:
         
         api_domain = self.config.get('api_domain')
         api_key = self.config.get('api_key')
-        media_model_dir = self.config.get('media_model_dir')
+        mediasdk_executable = self.config.get('mediasdk_executable')
         stella_exec = self.config.get('stella_executable')
         stella_config_path = self.config.get('stella_config_path')
         stella_vocab_path = self.config.get('stella_vocab_path')
         stella_results_path = self.config.get('stella_results_path')
+        self.enable_stella = self.config.get('enable_stella', False)
         
         if not api_domain or not api_key:
             raise ValueError("api_domain and api_key must be set in config.json")
-        if not media_model_dir:
-            raise ValueError("media_model_dir must be set in config.json")
+        if not mediasdk_executable:
+            raise ValueError("mediasdk_executable must be set in config.json")
         
         self.polling_interval = self.config['polling_interval']
         self.work_dir = Path(self.config['local_work_dir'])
@@ -61,7 +62,7 @@ class VideoProcessor:
         self.api_client = APIClient(api_domain, api_key)
         self.update_status_text = self.api_client.update_status_text  # direct alias
         self.file_ops = FileOperations(self.work_dir)
-        self.video_processing = VideoProcessing(self.work_dir, media_model_dir)
+        self.video_processing = VideoProcessing(self.work_dir, mediasdk_executable)
         self.frame_processing = FrameProcessing(self.work_dir, self.candidates_per_second, self.blur_settings)
         self.route_calculation = RouteCalculation(
             self.work_dir,
@@ -371,18 +372,22 @@ class VideoProcessor:
             # Step 8: Use 12fps low res frames for route calculation
             route_frames = self.get_route_frames_from_low_res(selected_low)
             
-            # Step 9: Calculate route
-            route_data = self.calculate_route(route_frames)
-            if route_data:
-                raw_path = route_data.get('raw_path')
-                if raw_path:
-                    # Update raw_path to the stitched video
-                    if self.processed_video_id:
-                        self.api_client.update_task_route(self.processed_video_id, raw_path)
+            # Step 9: Calculate route (optional, based on enable_stella config)
+            if self.enable_stella:
+                route_data = self.calculate_route(route_frames)
+                if route_data:
+                    raw_path = route_data.get('raw_path')
+                    if raw_path:
+                        # Update raw_path to the stitched video
+                        if self.processed_video_id:
+                            self.api_client.update_task_route(self.processed_video_id, raw_path)
+                        else:
+                            logger.warning("Cannot update raw_path: processed video ID not available")
                     else:
-                        logger.warning("Cannot update raw_path: processed video ID not available")
-                else:
-                    logger.warning("Route data returned without raw_path information")
+                        logger.warning("Route data returned without raw_path information")
+            else:
+                logger.info("Stella route calculation is disabled, skipping route calculation step")
+                self.update_status_text("Stella reitin laskenta on pois käytöstä, ohitetaan...")
             
             # Step 10: Mark videos for deletion
             if self.api_client.current_task_id:
@@ -395,10 +400,15 @@ class VideoProcessor:
             self.update_status_text("Siivotaan paikalliset hakemistot...")
             self.clean_local_directories()
             
-            # Report success
-            self.update_status_text("Tehtävä valmis, aloitetaan uuden tehtävän pollaus...")
-            self.api_client.report_task_completion(success=True)
-            logger.info(f"Task {self.api_client.current_task_id} processed successfully")
+            # Report success or waiting status
+            if self.enable_stella:
+                self.update_status_text("Tehtävä valmis, aloitetaan uuden tehtävän pollaus...")
+                self.api_client.report_task_completion(success=True)
+                logger.info(f"Task {self.api_client.current_task_id} processed successfully")
+            else:
+                self.update_status_text("Tehtävä valmis (odottaa reitin laskentaa), aloitetaan uuden tehtävän pollaus...")
+                self.api_client.report_task_completion(success=True, waiting_for_route=True)
+                logger.info(f"Task {self.api_client.current_task_id} processed successfully (waiting for route calculation)")
             return True
             
         except Exception as e:

@@ -55,7 +55,7 @@ class VideoProcessor:
         self.route_fps = self.config['route_calculation_fps']
         self.grace_period_days = self.config['video_deletion_grace_period_days']
         self.candidates_per_second = self.config.get('candidates_per_second', 12)
-        self.stella_frames_category = self.config.get('stella_frames_category', 'file_stella_frames_zip')
+        self.stella_frames_category = self.config.get('stella_frames_category', 'general_zip')
         
         self.blur_people = False  # Can be set from task data if needed
         self.blur_settings = self.config.get('blur_settings', {})

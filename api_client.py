@@ -148,13 +148,6 @@ class APIClient:
             
             logger.info(f"Image stored successfully with ID: {image_uuid}")
             
-            # In test mode, print the full API response
-            if self.test_mode:
-                import json as json_module
-                print(f"\n=== IMAGE API RESPONSE (type: {image_type}) ===")
-                print(json_module.dumps(register_response, indent=2))
-                print("=" * 60)
-            
             return image_uuid
             
         except requests.exceptions.RequestException as e:

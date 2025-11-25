@@ -88,8 +88,7 @@ class StellaRunner:
         """Fetch next task with waiting_for_route_calculation status."""
         logger.info("Fetching next Stella route calculation task...")
         url = "/api/v1/process-recording-task/get-next-task"
-        return self.api_client._api_request('GET', url, params={"task_type": "waiting_for_route_calculation"})
-    
+        return self.api_client._api_request('GET', url, params={"task_type": "route_calculation"})
     def download_file(self, file_uuid: str, output_path: Path) -> bool:
         """Download file from API using file UUID."""
         try:

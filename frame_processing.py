@@ -476,6 +476,7 @@ class FrameProcessing:
         sorted_suffixes = sorted(frame_collections.keys())
         update_status_callback("Tallennetaan video frame objektit...")
         
+        frame_entries: List[Dict] = []
         total = len(sorted_suffixes)
         for idx, suffix in enumerate(sorted_suffixes):
             images = frame_collections[suffix]
@@ -491,9 +492,8 @@ class FrameProcessing:
             
             time_in_video = suffix / float(self.candidates_per_second)
             
-            # Log image IDs being used (especially in test mode)
             if hasattr(api_client, 'test_mode') and api_client.test_mode:
-                print(f"\n--- Creating video-frame for suffix {suffix} (time: {time_in_video}s) ---")
+                print(f"\n--- Preparing video-frame payload for suffix {suffix} (time: {time_in_video}s) ---")
                 print(f"  high_id: {high_id}")
                 print(f"  low_id: {low_id}")
                 print(f"  blur_high_id: {blur_high_id}")
@@ -501,25 +501,100 @@ class FrameProcessing:
                 print(f"  layer_id: {layer_id}")
                 print(f"  All images in collection: {images}")
             
+            payload = {
+                'project': project_id,
+                'video': video_id,
+                'time_in_video': int(time_in_video),
+                'high_image': high_id,
+                'image': low_id
+            }
+            
+            if blur_high_id:
+                payload['blur_high_image'] = blur_high_id
+            if blur_low_id:
+                payload['blur_image'] = blur_low_id
+            if layer_id:
+                payload['camera_layer_position'] = {
+                    "rx": 0,
+                    "ry": 0,
+                    "rz": 0,
+                    "layer": layer_id
+                }
+            
+            frame_entries.append({
+                'suffix': suffix,
+                'time_in_video': time_in_video,
+                'high_id': high_id,
+                'low_id': low_id,
+                'blur_high_id': blur_high_id,
+                'blur_low_id': blur_low_id,
+                'payload': payload
+            })
+            
+            if (idx + 1) % 5 == 0 or idx == total - 1:
+                update_status_callback(f"Valmistellaan video frameja: {idx + 1}/{total}")
+        
+        if not frame_entries:
+            update_status_callback("Ei frameja tallennettavaksi API:iin")
+            return saved_frame_ids
+        
+        bulk_payloads = [entry['payload'] for entry in frame_entries]
+        update_status_callback(f"Lähetetään {len(bulk_payloads)} video framea bulk-pyynnössä...")
+        bulk_response = api_client.save_video_frames_bulk(bulk_payloads)
+        
+        if bulk_response is None:
+            logger.warning("Bulk video frame luonti epäonnistui, yritetään yksittäisin kutsuin")
+            fallback_ids = self._store_video_frames_individual(frame_entries, api_client, update_status_callback, layer_id)
+            saved_frame_ids.extend(fallback_ids)
+            update_status_callback(f"Tallennettu {len(saved_frame_ids)} video framea API:iin (fallback)")
+            return saved_frame_ids
+        
+        failed_entries: List[Dict] = []
+        for idx, entry in enumerate(frame_entries):
+            response_entry = bulk_response[idx] if idx < len(bulk_response) else None
+            status_code = response_entry.get('status_code') if response_entry else None
+            frame_uuid = response_entry.get('uuid') if response_entry else None
+            
+            if status_code in (200, 201) and frame_uuid:
+                saved_frame_ids.append(frame_uuid)
+            else:
+                failed_entries.append(entry)
+                error_msg = (response_entry or {}).get('error', 'Tuntematon virhe')
+                logger.warning(f"Video framen tallennus epäonnistui suffixille {entry['suffix']}: {error_msg}")
+        
+        if failed_entries:
+            logger.warning(f"{len(failed_entries)} video framea epäonnistui bulk-vastauksessa, yritetään yksittäin...")
+            update_status_callback(f"Bulk tallennus epäonnistui {len(failed_entries)} framella, yritetään yksitellen...")
+            fallback_ids = self._store_video_frames_individual(failed_entries, api_client, update_status_callback, layer_id)
+            saved_frame_ids.extend(fallback_ids)
+        
+        update_status_callback(f"Tallennettu {len(saved_frame_ids)} video framea API:iin")
+        return saved_frame_ids
+    
+    def _store_video_frames_individual(self, frame_entries: List[Dict], api_client, update_status_callback, layer_id: Optional[str]) -> List[str]:
+        """Fallback to storing video frames one by one if bulk call fails."""
+        saved_frame_ids: List[str] = []
+        total = len(frame_entries)
+        
+        for idx, entry in enumerate(frame_entries):
             frame_uuid = api_client.save_videoframe(
-                project_id=project_id,
-                video_id=video_id,
-                time_in_video=time_in_video,
-                high_res_image_id=high_id,
-                low_res_image_id=low_id,
-                blur_high_image_id=blur_high_id,
-                blur_low_image_id=blur_low_id,
+                project_id=entry['payload']['project'],
+                video_id=entry['payload']['video'],
+                time_in_video=entry['time_in_video'],
+                high_res_image_id=entry['high_id'],
+                low_res_image_id=entry['low_id'],
+                blur_high_image_id=entry['blur_high_id'],
+                blur_low_image_id=entry['blur_low_id'],
                 layer_id=layer_id
             )
             
             if frame_uuid:
                 saved_frame_ids.append(frame_uuid)
                 if (idx + 1) % 5 == 0 or idx == total - 1:
-                    update_status_callback(f"Tallennetaan video frameja: {idx + 1}/{total}")
+                    update_status_callback(f"Yksittäistallennus: {idx + 1}/{total}")
             else:
-                logger.warning(f"Failed to create video frame for suffix {suffix}")
+                logger.warning(f"Failed to create video frame (fallback) for suffix {entry['suffix']}")
         
-        update_status_callback(f"Tallennettu {len(saved_frame_ids)} video framea API:iin")
         return saved_frame_ids
     
     def get_route_frames_from_low_res(self, low_frames: List[Path], update_status_callback) -> List[Path]:

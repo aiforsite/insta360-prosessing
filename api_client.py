@@ -361,6 +361,29 @@ class APIClient:
             logger.error(f"Failed to save video frame: {e}")
             return None
 
+    def save_video_frames_bulk(self, frames_payload: List[Dict]) -> Optional[List[Dict]]:
+        """Save multiple video frames using bulk endpoint."""
+        if not frames_payload:
+            return []
+        
+        logger.info(f"Saving {len(frames_payload)} video frames in bulk...")
+        response = self._api_request(
+            'POST',
+            '/api/v1/video-frame/bulk/',
+            json=frames_payload
+        )
+        
+        if response is None:
+            logger.error("Bulk video frame request failed")
+            return None
+        
+        if isinstance(response, list):
+            logger.info("Bulk video frame request completed")
+            return response
+        
+        logger.warning(f"Unexpected response format from bulk video frame endpoint: {type(response)}")
+        return None
+
     def fetch_video_frames(self, video_id: str, page_size: int = 200) -> List[Dict]:
         """Fetch all video-frame records for a given video."""
         frames: List[Dict] = []

@@ -5,7 +5,7 @@ API client module for handling all API requests.
 import logging
 import math
 import requests
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +163,95 @@ class APIClient:
         except Exception as e:
             logger.error(f"Unexpected error storing image: {e}")
             return None
-    
+
+    def store_zip_file(
+        self,
+        project_id: str,
+        zip_binary: bytes,
+        name: str = 'stella_frames.zip',
+        category: Optional[str] = None,
+        video_recording_id: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Store zip file to cloud storage.
+        
+        Process:
+        1. POST /api/v1/file/ {project, size, name, category?} -> {uuid, upload_url, ...}
+        2. PUT upload_url with zip_binary -> code 200
+        3. PUT /api/v1/file/<file_uuid>/register_file
+        """
+        try:
+            file_size = len(zip_binary)
+            logger.info(f"Requesting upload URL for zip file (size: {file_size})...")
+            payload = {
+                'project': project_id,
+                'name': name,
+                'size': file_size
+            }
+            if category:
+                payload['category'] = category
+            if video_recording_id:
+                payload['recording'] = video_recording_id
+            
+            upload_response = self._api_request(
+                'POST',
+                '/api/v1/file/',
+                json=payload
+            )
+            
+            if not upload_response:
+                logger.error("Failed to get upload URL for zip file")
+                return None
+            
+            file_uuid = upload_response.get('uuid')
+            upload_url = upload_response.get('upload_url')
+            
+            if not file_uuid or not upload_url:
+                logger.error("Missing uuid or upload_url in zip file response")
+                return None
+            
+            logger.info(f"Got upload URL for zip file {file_uuid}")
+            
+            try:
+                upload_result = requests.put(
+                    upload_url,
+                    data=zip_binary,
+                    headers={'Content-Type': 'application/zip'},
+                    timeout=600
+                )
+                upload_result.raise_for_status()
+                
+                if upload_result.status_code not in (200, 201):
+                    logger.error(f"Zip upload failed with status code {upload_result.status_code}")
+                    logger.error(f"Response text: {upload_result.text}")
+                    return None
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Zip upload failed: {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        logger.error(f"Response text: {e.response.text}")
+                    except Exception:
+                        pass
+                return None
+            
+            logger.info("Zip file uploaded successfully")
+            
+            register_response = self._api_request(
+                'PUT',
+                f'/api/v1/file/{file_uuid}/register_file'
+            )
+            
+            if not register_response:
+                logger.error("Failed to register zip file with API")
+                return None
+            
+            logger.info(f"Zip file stored successfully with ID: {file_uuid}")
+            return file_uuid
+        
+        except Exception as e:
+            logger.error(f"Failed to store zip file: {e}")
+            return None
+
     def store_video(
         self,
         project_id: str,
@@ -511,26 +599,73 @@ class APIClient:
         return result is not None
     
     def mark_videos_for_deletion(self, grace_period_days: int) -> bool:
-        """Mark front and back videos for deletion after grace period."""
-        if not self.current_task_id:
-            logger.warning("Cannot mark videos for deletion: no current task ID")
+        """Mark front and back videos for deletion after grace period using FileDeleteSchedule."""
+        if not self.current_video_recording_id:
+            logger.warning("Cannot mark videos for deletion: no current video recording ID")
             return False
         
         from datetime import datetime, timedelta
         
-        logger.info("Marking videos for deletion...")
-        deletion_date = datetime.now() + timedelta(days=grace_period_days)
-        result = self._api_request(
-            'PATCH',
-            f"/api/v1/process-recording-task/{self.current_task_id}/mark-for-deletion",
+        # Fetch video-recording to get front and back video file UUIDs
+        video_recording = self.fetch_video_recording(self.current_video_recording_id)
+        if not video_recording:
+            logger.error("Failed to fetch video-recording for deletion scheduling")
+            return False
+        
+        videos = video_recording.get('videos', [])
+        front_video = None
+        back_video = None
+        
+        for video in videos:
+            category = video.get('category')
+            if category == 'video_insta360_raw_front':
+                front_video = video
+            elif category == 'video_insta360_raw_back':
+                back_video = video
+        
+        if not front_video or not back_video:
+            logger.error("Missing front or back video in video-recording data")
+            return False
+        
+        # Get file UUIDs from videos (videos have a 'file' field that references the File object)
+        front_file_uuid = front_video.get('file')
+        back_file_uuid = back_video.get('file')
+        
+        if not front_file_uuid or not back_file_uuid:
+            logger.error("Missing file UUIDs in front or back video data")
+            return False
+        
+        scheduled_for = datetime.now() + timedelta(days=grace_period_days)
+        url = "/api/v1/file-delete-schedule/"
+        
+        # Create FileDeleteSchedule for front video
+        front_result = self._api_request(
+            'POST',
+            url,
             json={
-                'front_video_deletion_date': deletion_date.isoformat(),
-                'back_video_deletion_date': deletion_date.isoformat()
+                'file': front_file_uuid,
+                'scheduled_for': scheduled_for.isoformat()
             }
         )
-        return result is not None
+        
+        # Create FileDeleteSchedule for back video
+        back_result = self._api_request(
+            'POST',
+            url,
+            json={
+                'file': back_file_uuid,
+                'scheduled_for': scheduled_for.isoformat()
+            }
+        )
+        
+        if front_result and back_result:
+            logger.info(f"Created FileDeleteSchedule for front video (file: {front_file_uuid}) and back video (file: {back_file_uuid})")
+            return True
+        else:
+            logger.warning("Failed to create one or both FileDeleteSchedule objects")
+            return False
     
-    def report_task_completion(self, success: bool, error: Optional[str] = None, waiting_for_route: bool = False):
+    def report_task_completion(self, success: bool, error: Optional[str] = None, waiting_for_route: bool = False, details: Optional[Dict[str, Any]] = None):
         """Report task completion to API."""
         if not self.current_task_id:
             logger.warning("Cannot report completion: no current task ID")
@@ -547,10 +682,13 @@ class APIClient:
             status = 'failed'
         
         # Update process-recording-task status
+        payload: Dict[str, Any] = {'status': status}
+        if details is not None:
+            payload['details'] = details
         task_result = self._api_request(
             'PATCH',
             f'/api/v1/process-recording-task/{self.current_task_id}',
-            json={'status': status}
+            json=payload
         )
         
         # Update video-recording status to "ready_to_view" (if success)

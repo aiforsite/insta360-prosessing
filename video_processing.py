@@ -4,8 +4,10 @@ Video processing module for downloading and stitching videos.
 
 import logging
 import os
+import re
 import subprocess
 import requests
+from urllib.parse import urlparse, parse_qs, unquote
 from pathlib import Path
 from typing import Tuple, Optional, Dict
 
@@ -37,6 +39,38 @@ class VideoProcessing:
             logger.error(f"Failed to download video: {e}")
             return False
     
+    def _infer_file_extension(self, url: str, default_extension: str = ".mp4") -> str:
+        """Infer file extension from URL query/path (handles S3 response-content-disposition)."""
+        try:
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+            
+            # Prefer filename from response-content-disposition parameter because S3 paths are hash-like
+            rcd_values = query_params.get('response-content-disposition') or []
+            for value in rcd_values:
+                decoded = unquote(value)
+                match = re.search(r'filename\s*=\s*"?([^";]+)"?', decoded, re.IGNORECASE)
+                if match:
+                    suffix = Path(match.group(1)).suffix
+                    if suffix:
+                        return suffix
+            
+            # Fallback to direct filename parameter if present
+            filename_values = query_params.get('filename') or []
+            for value in filename_values:
+                suffix = Path(unquote(value)).suffix
+                if suffix:
+                    return suffix
+            
+            # Finally, try to use suffix from actual URL path
+            path_suffix = Path(unquote(parsed.path)).suffix
+            if path_suffix:
+                return path_suffix
+        except Exception as exc:
+            logger.debug(f"Could not infer extension from URL {url}: {exc}")
+        
+        return default_extension
+    
     def download_videos(self, video_recording: Dict, api_client, update_status_callback) -> Tuple[Optional[Path], Optional[Path]]:
         """Download front and back videos from video-recording data."""
         logger.info("Downloading front and back videos...")
@@ -67,8 +101,11 @@ class VideoProcessing:
             update_status_callback("Virhe: Videoiden URL-osoitteet puuttuvat")
             return None, None
         
-        front_path = self.work_dir / "front_video.mp4"
-        back_path = self.work_dir / "back_video.mp4"
+        front_ext = self._infer_file_extension(front_url, ".insv")
+        back_ext = self._infer_file_extension(back_url, ".insv")
+        
+        front_path = self.work_dir / f"front_video{front_ext}"
+        back_path = self.work_dir / f"back_video{back_ext}"
         
         update_status_callback("Ladataan front video...")
         front_ok = self.download_video(front_url, front_path)

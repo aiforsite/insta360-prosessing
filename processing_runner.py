@@ -7,6 +7,7 @@ import json
 import time
 import logging
 import shutil
+import zipfile
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
@@ -54,6 +55,7 @@ class VideoProcessor:
         self.route_fps = self.config['route_calculation_fps']
         self.grace_period_days = self.config['video_deletion_grace_period_days']
         self.candidates_per_second = self.config.get('candidates_per_second', 12)
+        self.stella_frames_category = self.config.get('stella_frames_category', 'file_stella_frames_zip')
         
         self.blur_people = False  # Can be set from task data if needed
         self.blur_settings = self.config.get('blur_settings', {})
@@ -149,6 +151,58 @@ class VideoProcessor:
             low_frames,
             self.update_status_text
         )
+
+    def package_stella_frames(self, frame_paths: list[Path]) -> Optional[Path]:
+        """Package Stella frame inputs into a single ZIP archive."""
+        if not frame_paths:
+            logger.warning("No frames available to package for Stella routing")
+            return None
+        
+        zip_path = self.work_dir / "stella_route_frames.zip"
+        try:
+            if zip_path.exists():
+                zip_path.unlink()
+            
+            with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                for frame in frame_paths:
+                    if frame.exists():
+                        zf.write(frame, arcname=frame.name)
+                    else:
+                        logger.warning(f"Frame missing during zip packaging: {frame}")
+            
+            logger.info(f"Packaged {len(frame_paths)} frames into {zip_path}")
+            return zip_path
+        except Exception as exc:
+            logger.error(f"Failed to package Stella frames: {exc}")
+            return None
+
+    def upload_stella_frames_zip(self, zip_path: Path, project_id: str, video_recording: Optional[Dict]) -> Optional[str]:
+        """Upload Stella route frames zip to API storage."""
+        if not zip_path.exists():
+            logger.warning(f"Stella frames zip not found at {zip_path}")
+            return None
+        
+        try:
+            with open(zip_path, 'rb') as f:
+                zip_binary = f.read()
+        except Exception as exc:
+            logger.error(f"Failed to read Stella frames zip: {exc}")
+            return None
+        
+        video_recording_id = video_recording.get('uuid') if video_recording else self.api_client.current_video_recording_id
+        logger.info("Uploading Stella frames zip to API...")
+        zip_uuid = self.api_client.store_zip_file(
+            project_id=project_id,
+            zip_binary=zip_binary,
+            name=zip_path.name,
+            category=self.stella_frames_category,
+            video_recording_id=video_recording_id
+        )
+        if zip_uuid:
+            logger.info(f"Stella frames zip stored with ID {zip_uuid}")
+        else:
+            logger.warning("Failed to store Stella frames zip")
+        return zip_uuid
 
     def _extract_image_id(self, image_field) -> Optional[str]:
         """Helper to extract UUID from image reference."""
@@ -302,6 +356,7 @@ class VideoProcessor:
     def process_task(self, task: Dict) -> bool:
         """Process a single video task through all steps."""
         self.api_client.current_task_id = task.get('uuid')
+        self.api_client.test_mode = task.get('is_test', False)
         self.api_client.current_video_recording_id = task.get('video_recording')
         logger.info(f"Processing task {self.api_client.current_task_id}")
         self.update_status_text("Aloitetaan videokäsittelytehtävä...")
@@ -371,6 +426,7 @@ class VideoProcessor:
             
             # Step 8: Use 12fps low res frames for route calculation
             route_frames = self.get_route_frames_from_low_res(selected_low)
+            stella_zip_uuid: Optional[str] = None
             
             # Step 9: Calculate route (optional, based on enable_stella config)
             if self.enable_stella:
@@ -388,13 +444,25 @@ class VideoProcessor:
             else:
                 logger.info("Stella route calculation is disabled, skipping route calculation step")
                 self.update_status_text("Stella reitin laskenta on pois käytöstä, ohitetaan...")
+                self.update_status_text("Paketoi Stella framet zip-arkistoon...")
+                stella_zip_path = self.package_stella_frames(route_frames)
+                if stella_zip_path and project_id:
+                    self.update_status_text("Ladataan Stella frame zip API:in...")
+                    stella_zip_uuid = self.upload_stella_frames_zip(stella_zip_path, project_id, video_recording)
+                    if stella_zip_uuid:
+                        self.update_status_text("Stella frame zip tallennettu pilveen")
+                    else:
+                        self.update_status_text("Varoitus: Stella frame zip tallennus epäonnistui")
+                else:
+                    logger.warning("Stella frame zip packaging skipped (missing frames or project)")
+                    self.update_status_text("Varoitus: Stella frame zip pakkaus epäonnistui")
             
             # Step 10: Mark videos for deletion
-            if self.api_client.current_task_id:
+            if self.api_client.current_task_id and not self.api_client.test_mode:
                 self.update_status_text(f"Merkataan front ja back video tuhottavaksi {self.grace_period_days} päivän päästä (varoaika)...")
-            result = self.api_client.mark_videos_for_deletion(self.grace_period_days)
-            if result:
-                self.update_status_text("Videot merkitty poistettavaksi")
+                result = self.api_client.mark_videos_for_deletion(self.grace_period_days)
+                if result:
+                    self.update_status_text("Videot merkitty poistettavaksi")
             
             # Step 11: Clean local directories
             self.update_status_text("Siivotaan paikalliset hakemistot...")
@@ -407,7 +475,14 @@ class VideoProcessor:
                 logger.info(f"Task {self.api_client.current_task_id} processed successfully")
             else:
                 self.update_status_text("Tehtävä valmis (odottaa reitin laskentaa), aloitetaan uuden tehtävän pollaus...")
-                self.api_client.report_task_completion(success=True, waiting_for_route=True)
+                details_payload = {}
+                if stella_zip_uuid:
+                    details_payload['stella_frames_zip_uuid'] = stella_zip_uuid
+                self.api_client.report_task_completion(
+                    success=True,
+                    waiting_for_route=True,
+                    details=details_payload or None
+                )
                 logger.info(f"Task {self.api_client.current_task_id} processed successfully (waiting for route calculation)")
             return True
             

@@ -274,6 +274,7 @@ class APIClient:
                     'project': project_id,
                     'name': name or 'video',
                     'size': video_size,
+                    'category': 'video_360_field_raw',
                     'type': video_type,
                     **({'recording': video_recording_id} if video_recording_id else {})
                 }

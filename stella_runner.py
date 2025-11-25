@@ -199,7 +199,7 @@ class StellaRunner:
             videos = video_recording.get('videos', [])
             processed_video = None
             for video in videos:
-                if video.get('category') == 'video_insta360_processed_stitched':
+                if video.get('category') == 'video_360_field_raw':
                     processed_video = video
                     break
             

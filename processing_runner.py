@@ -399,12 +399,17 @@ class VideoProcessor:
             self.processed_video_id = stitched_video_id
             
             # Step 5: Create and select frames (12fps high and low res, select sharpest)
+            if not stitched_path.exists():
+                raise Exception(f"Stitched video not found at {stitched_path}")
+            if stitched_path.stat().st_size == 0:
+                raise Exception(f"Stitched video is empty at {stitched_path}")
+            
             selected_high, selected_low = self.frame_processing.create_and_select_frames(
                 stitched_path,
                 self.update_status_text
             )
             if not selected_high or not selected_low:
-                raise Exception("Failed to create and select frames")
+                raise Exception(f"Failed to create and select frames (got {len(selected_high)} high and {len(selected_low)} low frames)")
             
             # Step 6: Optional blur
             final_high, final_low = self.frame_processing.blur_frames_optional(

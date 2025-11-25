@@ -86,6 +86,15 @@ class FrameProcessing:
     def extract_frames_high_and_low(self, video_path: Path, high_dir: Path, low_dir: Path, fps: float) -> Tuple[List[Path], List[Path]]:
         """Extract high and low resolution frames simultaneously."""
         logger.info(f"Extracting {fps} FPS frames (high and low res) from {video_path}...")
+        
+        if not video_path.exists():
+            logger.error(f"Video file does not exist: {video_path}")
+            return [], []
+        
+        if video_path.stat().st_size == 0:
+            logger.error(f"Video file is empty: {video_path}")
+            return [], []
+        
         high_dir.mkdir(parents=True, exist_ok=True)
         low_dir.mkdir(parents=True, exist_ok=True)
         
@@ -126,11 +135,13 @@ class FrameProcessing:
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Frame extraction failed with exit code {e.returncode}")
+            if e.stdout:
+                logger.error(f"stdout: {e.stdout}")
             if e.stderr:
                 logger.error(f"stderr: {e.stderr}")
             return [], []
         except Exception as e:
-            logger.error(f"Frame extraction failed: {e}")
+            logger.error(f"Frame extraction failed: {e}", exc_info=True)
             return [], []
     
     def _select_best_frames_by_sharpness(self, high_frames: List[Path], candidates_per_second: int) -> set[int]:

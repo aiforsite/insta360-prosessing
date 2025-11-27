@@ -4,6 +4,7 @@ API client module for handling all API requests.
 
 import logging
 import math
+import time
 import requests
 from typing import Dict, Optional, List, Any
 
@@ -25,27 +26,65 @@ class APIClient:
         self.current_video_recording_id = None
         self.test_mode = False
     
-    def _api_request(self, method: str, endpoint: str, **kwargs) -> Optional[Dict]:
-        """Make API request with error handling."""
+    def _api_request(self, method: str, endpoint: str, max_retries: int = 3, **kwargs) -> Optional[Dict]:
+        """
+        Make API request with error handling and retry logic.
+        
+        Args:
+            method: HTTP method (GET, POST, PATCH, etc.)
+            endpoint: API endpoint path
+            max_retries: Maximum number of retry attempts (default: 3)
+            **kwargs: Additional arguments passed to requests.request()
+        
+        Returns:
+            Response JSON as dict if successful, None otherwise
+        """
         url = f"{self.api_domain}{endpoint}"
-        try:
-            response = requests.request(
-                method,
-                url,
-                headers=self.headers,
-                **kwargs
-            )
-            response.raise_for_status()
-            return response.json() if response.content else {}
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API request failed: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    response_text = e.response.text
-                    logger.error(f"API response text: {response_text}")
-                except Exception:
-                    pass
-            return None
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.request(
+                    method,
+                    url,
+                    headers=self.headers,
+                    **kwargs
+                )
+                response.raise_for_status()
+                return response.json() if response.content else {}
+                
+            except requests.exceptions.RequestException as e:
+                is_last_attempt = (attempt == max_retries - 1)
+                
+                # Log error details
+                error_msg = f"API request failed (attempt {attempt + 1}/{max_retries}): {e}"
+                if is_last_attempt:
+                    logger.error(error_msg)
+                else:
+                    logger.warning(error_msg)
+                
+                # Log response details if available
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        response_text = e.response.text
+                        status_code = e.response.status_code
+                        if is_last_attempt:
+                            logger.error(f"API response status: {status_code}, text: {response_text[:500]}")
+                        else:
+                            logger.warning(f"API response status: {status_code}, text: {response_text[:200]}")
+                    except Exception:
+                        pass
+                
+                # Don't retry on last attempt
+                if is_last_attempt:
+                    return None
+                
+                # Calculate exponential backoff delay: 1s, 2s, 4s, etc.
+                delay = 2 ** attempt
+                logger.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+        
+        # Should not reach here, but just in case
+        return None
     
     def update_status_text(self, status_text: str) -> bool:
         """Update task status_text in API."""

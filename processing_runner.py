@@ -7,7 +7,11 @@ import json
 import time
 import logging
 import shutil
+import psutil
 import zipfile
+import os
+import sys
+import subprocess
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
@@ -361,6 +365,13 @@ class VideoProcessor:
         logger.info(f"Processing task {self.api_client.current_task_id}")
         self.update_status_text("Aloitetaan videokäsittelytehtävä...")
         
+        # Update video-recording status to "processing"
+        if self.api_client.current_video_recording_id:
+            self.api_client.reset_video_recording_status(
+                self.api_client.current_video_recording_id,
+                status='processing'
+            )
+        
         try:
             # Step 2: Clean directories
             self.clean_local_directories()
@@ -595,6 +606,80 @@ class VideoProcessor:
 
 if __name__ == "__main__":
     import argparse
+    
+    # Kill other instances of this script before starting
+    current_pid = os.getpid()
+    script_name = os.path.basename(__file__)
+    
+    killed_count = 0
+    try:
+        if os.name == 'nt':  # Windows
+            # Find all Python processes running processing_runner.py
+            result = subprocess.run(
+                ['wmic', 'process', 'where', 'name="python.exe"', 'get', 'ProcessId,CommandLine'],
+                capture_output=True, text=True, timeout=10
+            )
+            
+            for line in result.stdout.splitlines():
+                if script_name in line and str(current_pid) not in line:
+                    # Extract PID (first number in line)
+                    parts = line.split()
+                    for part in parts:
+                        try:
+                            pid = int(part)
+                            if pid != current_pid:
+                                logger.info(f"Killing existing instance (PID: {pid})")
+                                subprocess.run(
+                                    ['taskkill', '/F', '/PID', str(pid)],
+                                    capture_output=True,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=5
+                                )
+                                killed_count += 1
+                                break
+                        except ValueError:
+                            continue
+        else:  # Linux/Unix
+            # Use psutil if available, otherwise use pgrep
+            try:
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    try:
+                        if proc.info['name'] and 'python' in proc.info['name'].lower():
+                            cmdline = proc.info.get('cmdline', [])
+                            if cmdline and any(script_name in arg for arg in cmdline):
+                                pid = proc.info['pid']
+                                if pid != current_pid:
+                                    logger.info(f"Killing existing instance (PID: {pid})")
+                                    proc.kill()
+                                    killed_count += 1
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+            except ImportError:
+                # Fallback to pgrep if psutil not available
+                try:
+                    result = subprocess.run(
+                        ['pgrep', '-f', script_name],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    for pid_str in result.stdout.strip().splitlines():
+                        try:
+                            pid = int(pid_str)
+                            if pid != current_pid:
+                                logger.info(f"Killing existing instance (PID: {pid})")
+                                subprocess.run(['kill', '-9', str(pid)], timeout=5)
+                                killed_count += 1
+                        except ValueError:
+                            pass
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    pass
+        
+        if killed_count > 0:
+            logger.info(f"Killed {killed_count} existing instance(s)")
+            time.sleep(1)  # Give processes time to die
+    except Exception as e:
+        logger.warning(f"Failed to check for existing instances: {e}")
 
     parser = argparse.ArgumentParser(description="Insta360 video processing runner")
     parser.add_argument(

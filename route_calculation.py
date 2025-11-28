@@ -285,12 +285,14 @@ class RouteCalculation:
                 logger.info(f"Copied vocab file to work directory: {vocab_file.name}")
             
             # Build Docker command via WSL: wsl docker run ...
+            # Use --entrypoint to override Dockerfile entrypoint
             # WSL paths are already in Linux format, so use them directly
             cmd = [
                 'wsl', 'docker', 'run', '--rm',
                 '-v', f'{work_dir_wsl}:{self.docker_data_mount}',
+                '--workdir', '/stella_vslam_examples/build',
+                '--entrypoint', self.stella_exec,
                 self.docker_image,
-                self.stella_exec,
                 '-c', stella_config_path_container,
                 '-d', frames_dir_container,
                 '--frame-skip', '1',

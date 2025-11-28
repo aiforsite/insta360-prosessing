@@ -259,15 +259,7 @@ class RouteCalculation:
         
         # Build command based on execution method
         if self.use_docker:
-            # Check if docker is available
-            docker_cmd = shutil.which('docker') or shutil.which('docker.exe')
-            if not docker_cmd:
-                error_msg = "Docker not found in PATH. Please install Docker Desktop or ensure docker is in PATH."
-                logger.error(error_msg)
-                update_status_callback(f"Virhe: Docker ei löydy järjestelmästä")
-                return None
-            
-            # Docker execution: mount work_dir to /data in container
+            # Docker execution via WSL: mount work_dir to /data in container
             work_dir_abs = str(self.work_dir.resolve())
             work_dir_wsl = to_wsl_path(work_dir_abs)
             
@@ -292,9 +284,10 @@ class RouteCalculation:
                 shutil.copy2(vocab_file, self.work_dir / vocab_file.name)
                 logger.info(f"Copied vocab file to work directory: {vocab_file.name}")
             
-            # Build Docker command - use docker_cmd (docker or docker.exe)
+            # Build Docker command via WSL: wsl docker run ...
+            # WSL paths are already in Linux format, so use them directly
             cmd = [
-                docker_cmd, 'run', '--rm',
+                'wsl', 'docker', 'run', '--rm',
                 '-v', f'{work_dir_wsl}:{self.docker_data_mount}',
                 self.docker_image,
                 self.stella_exec,

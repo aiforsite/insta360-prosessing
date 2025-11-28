@@ -6,6 +6,8 @@ import logging
 import math
 import subprocess
 import json
+import shutil
+import os
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime
@@ -257,6 +259,14 @@ class RouteCalculation:
         
         # Build command based on execution method
         if self.use_docker:
+            # Check if docker is available
+            docker_cmd = shutil.which('docker') or shutil.which('docker.exe')
+            if not docker_cmd:
+                error_msg = "Docker not found in PATH. Please install Docker Desktop or ensure docker is in PATH."
+                logger.error(error_msg)
+                update_status_callback(f"Virhe: Docker ei löydy järjestelmästä")
+                return None
+            
             # Docker execution: mount work_dir to /data in container
             work_dir_abs = str(self.work_dir.resolve())
             work_dir_wsl = to_wsl_path(work_dir_abs)
@@ -275,18 +285,16 @@ class RouteCalculation:
             vocab_file = Path(self.stella_vocab_path)
             
             if not (self.work_dir / config_file.name).exists() and config_file.exists():
-                import shutil
                 shutil.copy2(config_file, self.work_dir / config_file.name)
                 logger.info(f"Copied config file to work directory: {config_file.name}")
             
             if not (self.work_dir / vocab_file.name).exists() and vocab_file.exists():
-                import shutil
                 shutil.copy2(vocab_file, self.work_dir / vocab_file.name)
                 logger.info(f"Copied vocab file to work directory: {vocab_file.name}")
             
-            # Build Docker command
+            # Build Docker command - use docker_cmd (docker or docker.exe)
             cmd = [
-                'docker', 'run', '--rm',
+                docker_cmd, 'run', '--rm',
                 '-v', f'{work_dir_wsl}:{self.docker_data_mount}',
                 self.docker_image,
                 self.stella_exec,

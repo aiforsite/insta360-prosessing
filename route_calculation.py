@@ -263,26 +263,19 @@ class RouteCalculation:
             work_dir_abs = str(self.work_dir.resolve())
             work_dir_wsl = to_wsl_path(work_dir_abs)
             
-            # Paths inside container (mounted at /data)
+            # Paths inside container
+            # Config and vocab are already in the container at /opt/stella_vslam/
+            # Use them directly, no need to copy to /data
             frames_dir_container = f"{self.docker_data_mount}/{frames_dir.relative_to(self.work_dir)}"
             map_output_path_container = f"{self.docker_data_mount}/{map_output_path.relative_to(self.work_dir)}"
-            stella_config_path_container = f"{self.docker_data_mount}/{Path(self.stella_config_path).name}"
-            stella_vocab_path_container = f"{self.docker_data_mount}/{Path(self.stella_vocab_path).name}"
             stella_results_path_container = None
             if stella_results_path_abs:
                 stella_results_path_container = f"{self.docker_data_mount}/{Path(stella_results_path_abs).relative_to(self.work_dir)}"
             
-            # Copy config and vocab files to work_dir if they're not already there
-            config_file = Path(self.stella_config_path)
-            vocab_file = Path(self.stella_vocab_path)
-            
-            if not (self.work_dir / config_file.name).exists() and config_file.exists():
-                shutil.copy2(config_file, self.work_dir / config_file.name)
-                logger.info(f"Copied config file to work directory: {config_file.name}")
-            
-            if not (self.work_dir / vocab_file.name).exists() and vocab_file.exists():
-                shutil.copy2(vocab_file, self.work_dir / vocab_file.name)
-                logger.info(f"Copied vocab file to work directory: {vocab_file.name}")
+            # Use container-internal paths for config and vocab (they're already in the image)
+            # config.json has paths like /opt/stella_vslam/insta360_equirect.yaml
+            stella_config_path_container = self.stella_config_path
+            stella_vocab_path_container = self.stella_vocab_path
             
             # Build Docker command via WSL: wsl docker run ...
             # Use --entrypoint to override Dockerfile entrypoint

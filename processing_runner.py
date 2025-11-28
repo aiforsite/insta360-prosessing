@@ -69,7 +69,8 @@ class VideoProcessor:
         self.api_client = APIClient(api_domain, api_key)
         self.update_status_text = self.api_client.update_status_text  # direct alias
         self.file_ops = FileOperations(self.work_dir)
-        self.video_processing = VideoProcessing(self.work_dir, mediasdk_executable)
+        stitch_config = self.config.get('stitch_config', {})
+        self.video_processing = VideoProcessing(self.work_dir, mediasdk_executable, stitch_config)
         self.frame_processing = FrameProcessing(self.work_dir, self.candidates_per_second, self.low_res_fps, self.blur_settings)
         self.route_calculation = RouteCalculation(
             self.work_dir,

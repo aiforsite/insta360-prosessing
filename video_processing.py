@@ -17,10 +17,15 @@ logger = logging.getLogger(__name__)
 class VideoProcessing:
     """Handles video download and stitching operations."""
     
-    def __init__(self, work_dir: Path, mediasdk_executable: str):
+    def __init__(self, work_dir: Path, mediasdk_executable: str, stitch_config: Optional[Dict] = None):
         """Initialize video processing."""
         self.work_dir = work_dir
         self.mediasdk_executable = mediasdk_executable
+        self.stitch_config = stitch_config or {}
+        # Default stitch parameters
+        self.output_size = self.stitch_config.get('output_size', '5760x2880')
+        self.enable_flowstate = self.stitch_config.get('enable_flowstate', 'ON')
+        self.enable_directionlock = self.stitch_config.get('enable_directionlock', 'ON')
     
     def download_video(self, url: str, output_path: Path) -> bool:
         """Download video from URL."""
@@ -146,9 +151,9 @@ class VideoProcessing:
                 self.mediasdk_executable,
                 '-inputs', str(front_path),
                 '-inputs', str(back_path),
-                '-output_size', '5760x2880',
-                '-enable_flowstate', 'ON',
-                '-enable_directionlock', 'ON',
+                '-output_size', self.output_size,
+                '-enable_flowstate', self.enable_flowstate,
+                '-enable_directionlock', self.enable_directionlock,
                 '-output', str(output_path)
             ]
             # Use environment variables as-is (Windows doesn't need LD_LIBRARY_PATH)

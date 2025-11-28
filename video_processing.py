@@ -26,13 +26,16 @@ class VideoProcessing:
         self.output_size = self.stitch_config.get('output_size', '5760x2880')
         self.enable_flowstate = self.stitch_config.get('enable_flowstate', 'ON')
         self.enable_directionlock = self.stitch_config.get('enable_directionlock', 'ON')
-        self.stitch_type = self.stitch_config.get('stitch_type', 'template')  # template, optflow, dynamicstitch, aistitch
+        self.disable_cuda = self.stitch_config.get('disable_cuda', False)  # false = enable CUDA
+        self.enable_debug_info = self.stitch_config.get('enable_debug_info', 'ON')
+        # Optional advanced parameters
+        self.stitch_type = self.stitch_config.get('stitch_type', None)  # template, optflow, dynamicstitch, aistitch
         self.ai_stitching_model = self.stitch_config.get('ai_stitching_model', '')
         self.enable_stitchfusion = self.stitch_config.get('enable_stitchfusion', 'OFF')
         self.enable_denoise = self.stitch_config.get('enable_denoise', 'OFF')
         self.enable_colorplus = self.stitch_config.get('enable_colorplus', 'OFF')
         self.enable_deflicker = self.stitch_config.get('enable_deflicker', 'OFF')
-        self.image_processing_accel = self.stitch_config.get('image_processing_accel', 'auto')  # auto, cpu
+        self.image_processing_accel = self.stitch_config.get('image_processing_accel', None)  # auto, cpu
         self.bitrate = self.stitch_config.get('bitrate', None)  # None = same as input
         self.enable_h265_encoder = self.stitch_config.get('enable_h265_encoder', False)
     
@@ -156,21 +159,28 @@ class VideoProcessing:
         
         try:
             # MediaSDKTest command for Windows
+            # Based on correct command format:
+            # MediaSDKTest.exe -inputs front.insv back.insv -disable_cuda false -enable_debug_info ON -output_size 5760x2880 -enable_directionlock ON -enable_flowstate ON -output output.mp4
             cmd = [
                 self.mediasdk_executable,
-                '-inputs', str(front_path),
-                '-inputs', str(back_path),
-                '-stitch_type', self.stitch_type,
+                '-inputs', str(front_path), str(back_path),  # Both inputs after single -inputs parameter
+                '-disable_cuda', 'false' if not self.disable_cuda else 'true',
+                '-enable_debug_info', self.enable_debug_info,
                 '-output_size', self.output_size,
-                '-enable_flowstate', self.enable_flowstate,
                 '-enable_directionlock', self.enable_directionlock,
-                '-image_processing_accel', self.image_processing_accel,
+                '-enable_flowstate', self.enable_flowstate,
                 '-output', str(output_path)
             ]
             
-            # Add optional parameters
+            # Add optional parameters if configured
+            if self.stitch_type:
+                cmd.extend(['-stitch_type', self.stitch_type])
+            
             if self.ai_stitching_model and self.stitch_type == 'aistitch':
                 cmd.extend(['-ai_stitching_model', self.ai_stitching_model])
+            
+            if self.image_processing_accel:
+                cmd.extend(['-image_processing_accel', self.image_processing_accel])
             
             if self.enable_stitchfusion != 'OFF':
                 cmd.extend(['-enable_stitchfusion', self.enable_stitchfusion])

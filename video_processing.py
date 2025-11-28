@@ -26,6 +26,15 @@ class VideoProcessing:
         self.output_size = self.stitch_config.get('output_size', '5760x2880')
         self.enable_flowstate = self.stitch_config.get('enable_flowstate', 'ON')
         self.enable_directionlock = self.stitch_config.get('enable_directionlock', 'ON')
+        self.stitch_type = self.stitch_config.get('stitch_type', 'template')  # template, optflow, dynamicstitch, aistitch
+        self.ai_stitching_model = self.stitch_config.get('ai_stitching_model', '')
+        self.enable_stitchfusion = self.stitch_config.get('enable_stitchfusion', 'OFF')
+        self.enable_denoise = self.stitch_config.get('enable_denoise', 'OFF')
+        self.enable_colorplus = self.stitch_config.get('enable_colorplus', 'OFF')
+        self.enable_deflicker = self.stitch_config.get('enable_deflicker', 'OFF')
+        self.image_processing_accel = self.stitch_config.get('image_processing_accel', 'auto')  # auto, cpu
+        self.bitrate = self.stitch_config.get('bitrate', None)  # None = same as input
+        self.enable_h265_encoder = self.stitch_config.get('enable_h265_encoder', False)
     
     def download_video(self, url: str, output_path: Path) -> bool:
         """Download video from URL."""
@@ -151,11 +160,35 @@ class VideoProcessing:
                 self.mediasdk_executable,
                 '-inputs', str(front_path),
                 '-inputs', str(back_path),
+                '-stitch_type', self.stitch_type,
                 '-output_size', self.output_size,
                 '-enable_flowstate', self.enable_flowstate,
                 '-enable_directionlock', self.enable_directionlock,
+                '-image_processing_accel', self.image_processing_accel,
                 '-output', str(output_path)
             ]
+            
+            # Add optional parameters
+            if self.ai_stitching_model and self.stitch_type == 'aistitch':
+                cmd.extend(['-ai_stitching_model', self.ai_stitching_model])
+            
+            if self.enable_stitchfusion != 'OFF':
+                cmd.extend(['-enable_stitchfusion', self.enable_stitchfusion])
+            
+            if self.enable_denoise != 'OFF':
+                cmd.extend(['-enable_denoise', self.enable_denoise])
+            
+            if self.enable_colorplus != 'OFF':
+                cmd.extend(['-enable_colorplus', self.enable_colorplus])
+            
+            if self.enable_deflicker != 'OFF':
+                cmd.extend(['-enable_deflicker', self.enable_deflicker])
+            
+            if self.bitrate:
+                cmd.extend(['-bitrate', str(self.bitrate)])
+            
+            if self.enable_h265_encoder:
+                cmd.extend(['-enable_h265_encoder'])
             # Use environment variables as-is (Windows doesn't need LD_LIBRARY_PATH)
             env = os.environ.copy()
             
@@ -221,6 +254,94 @@ class VideoProcessing:
                                 logger.warning(f"Unexpected aspect ratio: {aspect_ratio:.2f}, expected 2.0 for equirectangular 360")
             except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
                 logger.debug(f"Could not probe video with ffprobe: {e}")
+            
+            # Add 360 metadata to the stitched video using ffmpeg
+            # MediaSDKTest.exe may not add proper 360 metadata, so we add it here
+            # This ensures the video is recognized as 360-degree equirectangular by players
+            logger.info("Adding 360 metadata to stitched video...")
+            update_status_callback("Lisätään 360-metadataa videoon...")
+            
+            temp_output = output_path.with_suffix('.temp' + output_path.suffix)
+            try:
+                # Use ffmpeg to inject proper 360 metadata
+                # First try with copy mode (fast, but may not work for all containers)
+                ffmpeg_cmd_copy = [
+                    'ffmpeg',
+                    '-i', str(output_path),
+                    '-c', 'copy',  # Copy streams without re-encoding
+                    '-metadata', 'spherical-video=1',
+                    '-metadata', 'stereo-mode=mono',
+                    '-y',  # Overwrite output file
+                    str(temp_output)
+                ]
+                
+                ffmpeg_result = subprocess.run(
+                    ffmpeg_cmd_copy,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                
+                if ffmpeg_result.returncode == 0:
+                    # Verify the temp file was created
+                    if temp_output.exists() and temp_output.stat().st_size > 0:
+                        output_path.unlink()
+                        temp_output.rename(output_path)
+                        logger.info("360 metadata added successfully (copy mode)")
+                        update_status_callback("360-metadata lisätty")
+                    else:
+                        logger.warning("Copy mode produced empty file, trying re-encode")
+                        if temp_output.exists():
+                            temp_output.unlink()
+                        raise Exception("Copy mode failed")
+                else:
+                    logger.warning(f"Copy mode failed: {ffmpeg_result.stderr}")
+                    if temp_output.exists():
+                        temp_output.unlink()
+                    raise Exception("Copy mode failed")
+                    
+            except Exception as e:
+                logger.info(f"Trying re-encode mode to add 360 metadata: {e}")
+                try:
+                    # Re-encode with proper 360 metadata injection
+                    # This ensures metadata is properly embedded
+                    ffmpeg_cmd_reencode = [
+                        'ffmpeg',
+                        '-i', str(output_path),
+                        '-vf', 'scale=5760:2880:flags=lanczos',  # Ensure correct resolution
+                        '-c:v', 'libx264',
+                        '-preset', 'fast',
+                        '-crf', '18',  # High quality
+                        '-pix_fmt', 'yuv420p',
+                        '-metadata', 'spherical-video=1',
+                        '-metadata', 'stereo-mode=mono',
+                        '-movflags', '+faststart',  # Web optimization
+                        '-y',
+                        str(temp_output)
+                    ]
+                    
+                    ffmpeg_result = subprocess.run(
+                        ffmpeg_cmd_reencode,
+                        capture_output=True,
+                        text=True,
+                        timeout=600
+                    )
+                    
+                    if ffmpeg_result.returncode == 0 and temp_output.exists() and temp_output.stat().st_size > 0:
+                        output_path.unlink()
+                        temp_output.rename(output_path)
+                        logger.info("360 metadata added successfully (re-encode mode)")
+                        update_status_callback("360-metadata lisätty")
+                    else:
+                        logger.warning(f"Re-encode mode failed: {ffmpeg_result.stderr if ffmpeg_result else 'No output'}")
+                        if temp_output.exists():
+                            temp_output.unlink()
+                        update_status_callback("Varoitus: 360-metadataa ei voitu lisätä, käytetään alkuperäistä videota")
+                except (subprocess.TimeoutExpired, FileNotFoundError) as e2:
+                    logger.warning(f"Could not add 360 metadata (ffmpeg not available or timeout): {e2}")
+                    if temp_output.exists():
+                        temp_output.unlink()
+                    update_status_callback("Varoitus: 360-metadataa ei voitu lisätä")
             
             logger.info(f"Videos stitched successfully to {output_path}")
             update_status_callback("Stitchaus valmis")

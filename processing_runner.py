@@ -70,7 +70,7 @@ class VideoProcessor:
         self.update_status_text = self.api_client.update_status_text  # direct alias
         self.file_ops = FileOperations(self.work_dir)
         self.video_processing = VideoProcessing(self.work_dir, mediasdk_executable)
-        self.frame_processing = FrameProcessing(self.work_dir, self.candidates_per_second, self.blur_settings)
+        self.frame_processing = FrameProcessing(self.work_dir, self.candidates_per_second, self.low_res_fps, self.blur_settings)
         self.route_calculation = RouteCalculation(
             self.work_dir,
             stella_exec or '',
@@ -154,10 +154,10 @@ class VideoProcessor:
             layer_id=layer_id
         )
     
-    def get_route_frames_from_low_res(self, low_frames: list[Path]) -> list[Path]:
-        """Use 12fps low res frames for route calculation."""
-        return self.frame_processing.get_route_frames_from_low_res(
-            low_frames,
+    def create_stella_frames(self, stitched_path: Path) -> list[Path]:
+        """Create 12fps frames for Stella VSLAM route calculation."""
+        return self.frame_processing.create_stella_frames(
+            stitched_path,
             self.update_status_text
         )
 
@@ -393,8 +393,10 @@ class VideoProcessor:
                 layer_id=layer_id
             )
             
-            # Step 8: Use 12fps low res frames for route calculation
-            route_frames = self.get_route_frames_from_low_res(selected_low)
+            # Step 8: Create 12fps frames for Stella route calculation
+            route_frames = self.create_stella_frames(stitched_path)
+            if not route_frames:
+                raise Exception("Failed to create Stella frames for route calculation")
             
             # Step 9: Calculate route using Stella VSLAM (via WSL if configured)
             route_data = self.calculate_route(route_frames)

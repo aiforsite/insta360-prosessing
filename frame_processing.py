@@ -17,10 +17,11 @@ logger = logging.getLogger(__name__)
 class FrameProcessing:
     """Handles frame extraction, selection, and processing."""
     
-    def __init__(self, work_dir: Path, candidates_per_second: int, blur_settings: Optional[Dict] = None):
+    def __init__(self, work_dir: Path, candidates_per_second: int, low_res_fps: int = 1, blur_settings: Optional[Dict] = None):
         """Initialize frame processing."""
         self.work_dir = work_dir
         self.candidates_per_second = candidates_per_second
+        self.low_res_fps = low_res_fps
         self.blur_settings = blur_settings or {}
         self.blur_conf_threshold = float(self.blur_settings.get('confidence_threshold', 0.7))
         self.blur_min_box_area = float(self.blur_settings.get('min_box_area', 2500))
@@ -260,13 +261,14 @@ class FrameProcessing:
         return scaled
     
     def create_and_select_frames(self, stitched_path: Path, update_status_callback) -> Tuple[List[Path], List[Path]]:
-        """Extract 12fps frames (high and low res), select sharpest from each group."""
-        update_status_callback(f"Luodaan framet ({self.candidates_per_second}/s) stitchatusta tiedostosta...")
+        """Extract 1fps frames (high and low res) for API storage."""
+        update_status_callback(f"Luodaan framet ({self.low_res_fps}/s) stitchatusta tiedostosta...")
         
         high_dir = self.work_dir / "high_frames"
         low_dir = self.work_dir / "low_frames"
         
-        # Extract high and low res frames
+        # Extract high and low res frames at 1 fps
+        # For 1 fps, we still extract at 12 fps first to select sharpest, then keep only 1 per second
         high_frames, low_frames = self.extract_frames_high_and_low(
             stitched_path, high_dir, low_dir, self.candidates_per_second
         )
@@ -277,7 +279,7 @@ class FrameProcessing:
         
         update_status_callback(f"Luotu {len(high_frames)} high res ja {len(low_frames)} low res framea")
         
-        # Select best frames based on sharpness
+        # Select best frames based on sharpness (one per second)
         update_status_callback("Valitaan terävimmät framet jokaisesta sekunnista...")
         selected_suffixes = self._select_best_frames_by_sharpness(high_frames, self.candidates_per_second)
         
@@ -318,7 +320,7 @@ class FrameProcessing:
             final_high.append(new_high)
             final_low.append(new_low)
         
-        update_status_callback(f"Valittu {len(final_high)} parasta framea")
+        update_status_callback(f"Valittu {len(final_high)} parasta framea ({self.low_res_fps}/s)")
         return final_high, final_low
     
     def blur_frames_optional(self, high_frames: List[Path], low_frames: List[Path], blur_people: bool, update_status_callback) -> Tuple[List[Path], List[Path]]:
@@ -607,6 +609,55 @@ class FrameProcessing:
                 logger.warning(f"Failed to create video frame (fallback) for suffix {entry['suffix']}")
         
         return saved_frame_ids
+    
+    def create_stella_frames(self, stitched_path: Path, update_status_callback) -> List[Path]:
+        """
+        Create 12fps frames for Stella VSLAM route calculation.
+        These are separate from the selected frames used for API storage.
+        
+        Args:
+            stitched_path: Path to stitched video
+            update_status_callback: Status update callback
+            
+        Returns:
+            List of frame paths for Stella
+        """
+        update_status_callback("Luodaan 12fps framet Stellan reitin laskentaan...")
+        
+        stella_dir = self.work_dir / "stella_frames"
+        stella_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Extract 12fps frames at low resolution (3840x1920) for Stella
+        # Use candidates_per_second (12) for frame rate
+        stella_pattern = str(stella_dir / "stella_%06d.jpg")
+        stella_cmd = [
+            'ffmpeg',
+            '-i', str(stitched_path),
+            '-vf', f'fps={self.candidates_per_second}/1:round=up',
+            '-s', '3840x1920',  # Low resolution for Stella
+            '-q:v', '0',  # Max quality
+            '-start_number', '0',
+            stella_pattern
+        ]
+        
+        try:
+            result = subprocess.run(stella_cmd, check=True, capture_output=True, text=True)
+            stella_frames = sorted(stella_dir.glob("stella_*.jpg"))
+            logger.info(f"Created {len(stella_frames)} Stella frames at {self.candidates_per_second} fps")
+            update_status_callback(f"Luotu {len(stella_frames)} Stella framea ({self.candidates_per_second}/s)")
+            return stella_frames
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Stella frame extraction failed with exit code {e.returncode}")
+            if e.stdout:
+                logger.error(f"stdout: {e.stdout}")
+            if e.stderr:
+                logger.error(f"stderr: {e.stderr}")
+            update_status_callback("Virhe: Stella framejen luonti epäonnistui")
+            return []
+        except Exception as e:
+            logger.error(f"Stella frame extraction failed: {e}", exc_info=True)
+            update_status_callback("Virhe: Stella framejen luonti epäonnistui")
+            return []
     
     def get_route_frames_from_low_res(self, low_frames: List[Path], update_status_callback) -> List[Path]:
         """Use 12fps low res frames for route calculation."""

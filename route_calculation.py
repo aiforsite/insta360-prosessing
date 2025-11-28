@@ -243,21 +243,22 @@ class RouteCalculation:
         for idx, frame_path in enumerate(frame_paths):
             suffix = self._extract_suffix(frame_path)
             # Calculate time_in_video based on suffix and candidates_per_second
-            # Suffix is the frame number from 12fps extraction (0, 1, 2, ..., 119 for 10s video)
-            # Selected frames are one per second, so suffix values are like 5, 17, 29, ...
-            # Time in video = suffix / candidates_per_second
+            # Stella frames are 12fps, so suffix values are 0, 1, 2, 3, ... (consecutive)
+            # Time in video = suffix / candidates_per_second (12)
+            # Example: suffix 0 = 0.000s, suffix 12 = 1.000s, suffix 24 = 2.000s
             time_in_video = (
                 suffix / float(self.candidates_per_second)
                 if suffix is not None and self.candidates_per_second
-                else float(idx)
+                else float(idx) / float(self.candidates_per_second) if self.candidates_per_second else float(idx)
             )
             
             # Use floor() to match the filtering logic - ensures we never round up
             # to a frame index that will not exist
             time_index = math.floor(time_in_video)
             
-            # Debug logging for all frames to understand the issue
-            logger.info(f"Frame {idx}: path={frame_path.name}, suffix={suffix}, time_in_video={time_in_video:.3f}s, time_index={time_index}")
+            # Debug logging for first 10 frames
+            if idx < 10:
+                logger.debug(f"Frame {idx}: path={frame_path.name}, suffix={suffix}, time_in_video={time_in_video:.3f}s, time_index={time_index}")
             
             # Get the route line for this time index
             if time_index in filtered_data:

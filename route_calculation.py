@@ -122,7 +122,7 @@ class RouteCalculation:
         first_line = "0.0 -0 -0 -0 0 0 0 1"
         filtered_data[0] = (0.0, first_line)
         
-        logger.debug(f"Processing {len(frame_trajectory)} frame_trajectory lines")
+        logger.info(f"Processing {len(frame_trajectory)} frame_trajectory lines")
         for idx, line in enumerate(frame_trajectory):
             line = line.strip()
             if not line:
@@ -134,11 +134,15 @@ class RouteCalculation:
                 # a frame index that will not exist.
                 time_in_video = math.floor(frame_time)
                 
+                # Log first few lines to understand the data
+                if idx < 10:
+                    logger.info(f"Trajectory line {idx}: frame_time={frame_time:.3f}s, time_in_video={time_in_video}s, line={line[:60]}...")
+                
                 # We take the first frame with a timestamp beginning with a new second.
                 if time_in_video not in filtered_data:
                     # Append the 1st frame starting with a new second.
                     filtered_data[time_in_video] = (frame_time, line)
-                    logger.debug(f"Added trajectory entry for second {time_in_video} (frame_time={frame_time:.3f}s)")
+                    logger.info(f"Added trajectory entry for second {time_in_video} (frame_time={frame_time:.3f}s)")
                 else:
                     logger.debug(f"Skipping duplicate entry for second {time_in_video} (frame_time={frame_time:.3f}s)")
             except (ValueError, IndexError) as e:
@@ -252,9 +256,8 @@ class RouteCalculation:
             # to a frame index that will not exist
             time_index = math.floor(time_in_video)
             
-            # Debug logging for first few frames
-            if idx < 5:
-                logger.debug(f"Frame {idx}: suffix={suffix}, time_in_video={time_in_video:.3f}s, time_index={time_index}")
+            # Debug logging for all frames to understand the issue
+            logger.info(f"Frame {idx}: path={frame_path.name}, suffix={suffix}, time_in_video={time_in_video:.3f}s, time_index={time_index}")
             
             # Get the route line for this time index
             if time_index in filtered_data:

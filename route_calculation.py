@@ -122,7 +122,8 @@ class RouteCalculation:
         first_line = "0.0 -0 -0 -0 0 0 0 1"
         filtered_data[0] = (0.0, first_line)
         
-        for line in frame_trajectory:
+        logger.debug(f"Processing {len(frame_trajectory)} frame_trajectory lines")
+        for idx, line in enumerate(frame_trajectory):
             line = line.strip()
             if not line:
                 continue
@@ -137,8 +138,11 @@ class RouteCalculation:
                 if time_in_video not in filtered_data:
                     # Append the 1st frame starting with a new second.
                     filtered_data[time_in_video] = (frame_time, line)
+                    logger.debug(f"Added trajectory entry for second {time_in_video} (frame_time={frame_time:.3f}s)")
+                else:
+                    logger.debug(f"Skipping duplicate entry for second {time_in_video} (frame_time={frame_time:.3f}s)")
             except (ValueError, IndexError) as e:
-                logger.warning(f"Could not parse frame trajectory line: {line[:50]}... Error: {e}")
+                logger.warning(f"Could not parse frame trajectory line {idx}: {line[:50]}... Error: {e}")
                 continue
         
         # Build formatted string
@@ -148,6 +152,7 @@ class RouteCalculation:
             s += "\n"
         
         logger.info(f"Filtered {len(filtered_data)} entries from {len(frame_trajectory)} frame_trajectory lines")
+        logger.debug(f"Filtered data keys: {sorted(filtered_data.keys())}")
         return filtered_data, s.strip()
     
     def _print_frame_trajectory_analysis(
@@ -233,6 +238,10 @@ class RouteCalculation:
         
         for idx, frame_path in enumerate(frame_paths):
             suffix = self._extract_suffix(frame_path)
+            # Calculate time_in_video based on suffix and candidates_per_second
+            # Suffix is the frame number from 12fps extraction (0, 1, 2, ..., 119 for 10s video)
+            # Selected frames are one per second, so suffix values are like 5, 17, 29, ...
+            # Time in video = suffix / candidates_per_second
             time_in_video = (
                 suffix / float(self.candidates_per_second)
                 if suffix is not None and self.candidates_per_second
@@ -242,6 +251,10 @@ class RouteCalculation:
             # Use floor() to match the filtering logic - ensures we never round up
             # to a frame index that will not exist
             time_index = math.floor(time_in_video)
+            
+            # Debug logging for first few frames
+            if idx < 5:
+                logger.debug(f"Frame {idx}: suffix={suffix}, time_in_video={time_in_video:.3f}s, time_index={time_index}")
             
             # Get the route line for this time index
             if time_index in filtered_data:

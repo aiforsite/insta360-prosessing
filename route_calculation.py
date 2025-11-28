@@ -283,6 +283,7 @@ class RouteCalculation:
             cmd = [
                 'wsl', 'docker', 'run', '--rm',
                 '-v', f'{work_dir_wsl}:{self.docker_data_mount}',
+                '-v', '/opt/stella_vslam:/opt/stella_vslam:ro',
                 '--workdir', '/stella_vslam_examples/build',
                 '--entrypoint', self.stella_exec,
                 self.docker_image,

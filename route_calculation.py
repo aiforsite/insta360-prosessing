@@ -150,6 +150,60 @@ class RouteCalculation:
         logger.info(f"Filtered {len(filtered_data)} entries from {len(frame_trajectory)} frame_trajectory lines")
         return filtered_data, s.strip()
     
+    def _print_frame_trajectory_analysis(
+        self, 
+        stella_data: Dict, 
+        filtered_data: Dict[int, Tuple[float, str]], 
+        raw_path: Dict[str, List],
+        frame_count: int
+    ):
+        """Print analysis of frame trajectory data before saving route."""
+        print("\n" + "="*80)
+        print("FRAME TRAJECTORY ANALYSIS")
+        print("="*80)
+        
+        # Basic statistics
+        frame_trajectory_str = stella_data.get("frame_trajectory", "")
+        if frame_trajectory_str:
+            frame_trajectory_lines = [e for e in frame_trajectory_str.split("\n") if e]
+            print(f"Total frame_trajectory entries: {len(frame_trajectory_lines)}")
+        else:
+            print("No frame_trajectory data found in stella_data")
+        
+        print(f"Filtered entries (one per second): {len(filtered_data)}")
+        print(f"Total frames processed: {frame_count}")
+        
+        # Raw path statistics
+        valid_entries = sum(1 for entry in raw_path.values() if entry[1] and entry[1].strip())
+        print(f"Raw path entries with valid route data: {valid_entries}/{len(raw_path)}")
+        
+        # Time range analysis
+        if filtered_data:
+            times = sorted([t for t, _ in filtered_data.values()])
+            if times:
+                print(f"Time range: {times[0]:.2f}s - {times[-1]:.2f}s (duration: {times[-1] - times[0]:.2f}s)")
+        
+        # Sample trajectory data
+        print("\nSample trajectory entries (first 5):")
+        for i, (time_idx, (frame_time, line)) in enumerate(sorted(filtered_data.items())[:5]):
+            parts = line.split()
+            if len(parts) >= 4:
+                try:
+                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                    print(f"  [{time_idx}s] t={frame_time:.3f}s: pos=({x:.3f}, {y:.3f}, {z:.3f})")
+                except (ValueError, IndexError):
+                    print(f"  [{time_idx}s] t={frame_time:.3f}s: {line[:60]}...")
+            else:
+                print(f"  [{time_idx}s] t={frame_time:.3f}s: {line[:60]}...")
+        
+        # Coverage analysis
+        if raw_path:
+            coverage_percent = (valid_entries / len(raw_path)) * 100 if raw_path else 0
+            print(f"\nRoute coverage: {coverage_percent:.1f}% ({valid_entries}/{len(raw_path)} frames have route data)")
+        
+        print("="*80 + "\n")
+        logger.info(f"Frame trajectory analysis: {len(filtered_data)} filtered entries, {valid_entries}/{len(raw_path)} frames with route data")
+    
     def _is_valid_route_line(self, line: str) -> bool:
         """Check if a route line is valid (has pose data, not just index)."""
         if not line or not line.strip():
@@ -437,6 +491,9 @@ class RouteCalculation:
             
             # Build raw_path using filtered data
             raw_path = self._build_raw_path(frame_paths, filtered_data) if filtered_data else {}
+            
+            # Print frame trajectory analysis before saving
+            self._print_frame_trajectory_analysis(stella_data, filtered_data, raw_path, len(frame_paths))
             
             route_data = {
                 'map_file': str(map_output_path),

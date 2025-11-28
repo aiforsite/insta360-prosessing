@@ -345,6 +345,7 @@ class RouteCalculation:
                 '-d', frames_dir_container,
                 '--frame-skip', '1',
                 '--no-sleep',
+                '--start-timestamp', '0',
                 '--auto-term',
                 '--map-db-out', map_output_path_container,
                 '-v', stella_vocab_path_container
@@ -372,6 +373,7 @@ class RouteCalculation:
                 '-d', frames_dir_wsl,
                 '--frame-skip', '1',
                 '--no-sleep',
+                '--start-timestamp', '0',
                 '--auto-term',
                 '--map-db-out', map_output_path_wsl,
                 '-v', stella_vocab_path_wsl
@@ -387,6 +389,7 @@ class RouteCalculation:
                 '-d', str(frames_dir),
                 '--frame-skip', '1',
                 '--no-sleep',
+                '--start-timestamp', '0',
                 '--auto-term',
                 '--map-db-out', str(map_output_path),
                 '-v', self.stella_vocab_path

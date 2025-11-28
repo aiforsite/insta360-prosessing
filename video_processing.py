@@ -124,6 +124,22 @@ class VideoProcessing:
         """Execute stitching of videos to output file using MediaSDKTest."""
         logger.info("Stitching videos...")
         update_status_callback("Suoritetaan videoiden stitchaus...")
+        
+        # Verify input files exist and have content
+        if not front_path.exists():
+            logger.error(f"Front video not found: {front_path}")
+            update_status_callback(f"Virhe: Front video ei löydy: {front_path}")
+            return False
+        
+        if not back_path.exists():
+            logger.error(f"Back video not found: {back_path}")
+            update_status_callback(f"Virhe: Back video ei löydy: {back_path}")
+            return False
+        
+        front_size = front_path.stat().st_size
+        back_size = back_path.stat().st_size
+        logger.info(f"Input files - Front: {front_path.name} ({front_size:,} bytes), Back: {back_path.name} ({back_size:,} bytes)")
+        
         try:
             # MediaSDKTest command for Windows
             cmd = [
@@ -135,7 +151,6 @@ class VideoProcessing:
                 '-enable_directionlock', 'ON',
                 '-output', str(output_path)
             ]
-            
             # Use environment variables as-is (Windows doesn't need LD_LIBRARY_PATH)
             env = os.environ.copy()
             
@@ -153,7 +168,56 @@ class VideoProcessing:
             if result.stderr:
                 logger.warning(f"MediaSDKTest stderr: {result.stderr}")
             
-            logger.info(f"Videos stitched to {output_path}")
+            # Verify output file was created and has content
+            if not output_path.exists():
+                logger.error(f"Stitched output file not created: {output_path}")
+                update_status_callback("Virhe: Stitchattu video ei luotu")
+                return False
+            
+            output_size = output_path.stat().st_size
+            logger.info(f"Stitched output: {output_path.name} ({output_size:,} bytes)")
+            
+            if output_size == 0:
+                logger.error(f"Stitched output file is empty: {output_path}")
+                update_status_callback("Virhe: Stitchattu video on tyhjä")
+                return False
+            
+            # Try to get video properties using ffprobe if available
+            try:
+                ffprobe_cmd = [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-select_streams', 'v:0',
+                    '-show_entries', 'stream=width,height,pix_fmt,codec_name',
+                    '-of', 'json',
+                    str(output_path)
+                ]
+                ffprobe_result = subprocess.run(
+                    ffprobe_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if ffprobe_result.returncode == 0:
+                    import json
+                    probe_data = json.loads(ffprobe_result.stdout)
+                    streams = probe_data.get('streams', [])
+                    if streams:
+                        stream = streams[0]
+                        width = stream.get('width')
+                        height = stream.get('height')
+                        codec = stream.get('codec_name')
+                        pix_fmt = stream.get('pix_fmt')
+                        logger.info(f"Stitched video properties: {width}x{height}, codec={codec}, pix_fmt={pix_fmt}")
+                        if width and height:
+                            aspect_ratio = width / height
+                            logger.info(f"Aspect ratio: {aspect_ratio:.2f} (expected 2.0 for equirectangular 360)")
+                            if abs(aspect_ratio - 2.0) > 0.1:
+                                logger.warning(f"Unexpected aspect ratio: {aspect_ratio:.2f}, expected 2.0 for equirectangular 360")
+            except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
+                logger.debug(f"Could not probe video with ffprobe: {e}")
+            
+            logger.info(f"Videos stitched successfully to {output_path}")
             update_status_callback("Stitchaus valmis")
             return True
         except subprocess.CalledProcessError as e:

@@ -23,7 +23,11 @@ class RouteCalculation:
         stella_config_path: str,
         stella_vocab_path: str,
         stella_results_path: str,
-        candidates_per_second: int
+        candidates_per_second: int,
+        use_wsl: bool = False,
+        use_docker: bool = False,
+        docker_image: str = "stella_vslam-socket",
+        docker_data_mount: str = "/data"
     ):
         """Initialize route calculation."""
         self.work_dir = work_dir
@@ -32,6 +36,10 @@ class RouteCalculation:
         self.stella_vocab_path = stella_vocab_path
         self.stella_results_path = stella_results_path
         self.candidates_per_second = candidates_per_second
+        self.use_wsl = use_wsl
+        self.use_docker = use_docker
+        self.docker_image = docker_image
+        self.docker_data_mount = docker_data_mount
     
     def _extract_suffix(self, frame_path: Path) -> Optional[int]:
         """Extract numeric suffix from frame filename."""
@@ -231,20 +239,111 @@ class RouteCalculation:
         else:
             stella_results_path_abs = ""
         
-        cmd = [
-            self.stella_exec,
-            '-c', self.stella_config_path,
-            '-d', str(frames_dir),
-            '--frame-skip', '1',
-            '--no-sleep',
-            '--auto-term',
-            '--map-db-out', str(map_output_path),
-            '-v', self.stella_vocab_path
-        ]
+        # Convert Windows paths to WSL paths for Docker volume mounts
+        def to_wsl_path(path: str) -> str:
+            # If already a Linux/WSL path (starts with /), return as-is
+            if path.startswith('/'):
+                return path
+            # Windows path like C:\work\frames or C:/work/frames
+            if ':' in path:
+                drive = path[0].lower()
+                rest = path[2:].replace('\\', '/')
+                # Remove leading slash if present
+                if rest.startswith('/'):
+                    rest = rest[1:]
+                return f"/mnt/{drive}/{rest}"
+            # Relative path, just normalize separators
+            return path.replace('\\', '/')
         
-        # Add --eval-log-dir only if path is set
-        if stella_results_path_abs:
-            cmd.extend(['--eval-log-dir', stella_results_path_abs])
+        # Build command based on execution method
+        if self.use_docker:
+            # Docker execution: mount work_dir to /data in container
+            work_dir_abs = str(self.work_dir.resolve())
+            work_dir_wsl = to_wsl_path(work_dir_abs)
+            
+            # Paths inside container (mounted at /data)
+            frames_dir_container = f"{self.docker_data_mount}/{frames_dir.relative_to(self.work_dir)}"
+            map_output_path_container = f"{self.docker_data_mount}/{map_output_path.relative_to(self.work_dir)}"
+            stella_config_path_container = f"{self.docker_data_mount}/{Path(self.stella_config_path).name}"
+            stella_vocab_path_container = f"{self.docker_data_mount}/{Path(self.stella_vocab_path).name}"
+            stella_results_path_container = None
+            if stella_results_path_abs:
+                stella_results_path_container = f"{self.docker_data_mount}/{Path(stella_results_path_abs).relative_to(self.work_dir)}"
+            
+            # Copy config and vocab files to work_dir if they're not already there
+            config_file = Path(self.stella_config_path)
+            vocab_file = Path(self.stella_vocab_path)
+            
+            if not (self.work_dir / config_file.name).exists() and config_file.exists():
+                import shutil
+                shutil.copy2(config_file, self.work_dir / config_file.name)
+                logger.info(f"Copied config file to work directory: {config_file.name}")
+            
+            if not (self.work_dir / vocab_file.name).exists() and vocab_file.exists():
+                import shutil
+                shutil.copy2(vocab_file, self.work_dir / vocab_file.name)
+                logger.info(f"Copied vocab file to work directory: {vocab_file.name}")
+            
+            # Build Docker command
+            cmd = [
+                'docker', 'run', '--rm',
+                '-v', f'{work_dir_wsl}:{self.docker_data_mount}',
+                self.docker_image,
+                self.stella_exec,
+                '-c', stella_config_path_container,
+                '-d', frames_dir_container,
+                '--frame-skip', '1',
+                '--no-sleep',
+                '--auto-term',
+                '--map-db-out', map_output_path_container,
+                '-v', stella_vocab_path_container
+            ]
+            
+            if stella_results_path_container:
+                cmd.extend(['--eval-log-dir', stella_results_path_container])
+                
+        elif self.use_wsl:
+            # WSL execution
+            # Convert work_dir paths (Windows) to WSL paths
+            frames_dir_wsl = to_wsl_path(str(frames_dir))
+            map_output_path_wsl = to_wsl_path(str(map_output_path))
+            stella_results_path_wsl = to_wsl_path(stella_results_path_abs) if stella_results_path_abs else None
+            
+            # Stella config and vocab paths are already Linux paths in config, use as-is
+            stella_config_path_wsl = self.stella_config_path
+            stella_vocab_path_wsl = self.stella_vocab_path
+            
+            # Build WSL command: wsl <stella_exec> <args>
+            cmd = [
+                'wsl',
+                self.stella_exec,
+                '-c', stella_config_path_wsl,
+                '-d', frames_dir_wsl,
+                '--frame-skip', '1',
+                '--no-sleep',
+                '--auto-term',
+                '--map-db-out', map_output_path_wsl,
+                '-v', stella_vocab_path_wsl
+            ]
+            
+            if stella_results_path_wsl:
+                cmd.extend(['--eval-log-dir', stella_results_path_wsl])
+        else:
+            # Native execution (Linux)
+            cmd = [
+                self.stella_exec,
+                '-c', self.stella_config_path,
+                '-d', str(frames_dir),
+                '--frame-skip', '1',
+                '--no-sleep',
+                '--auto-term',
+                '--map-db-out', str(map_output_path),
+                '-v', self.stella_vocab_path
+            ]
+            
+            # Add --eval-log-dir only if path is set
+            if stella_results_path_abs:
+                cmd.extend(['--eval-log-dir', stella_results_path_abs])
         
         logger.info(f"Running Stella VSLAM command: {' '.join(cmd)}")
         try:

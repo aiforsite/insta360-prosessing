@@ -208,10 +208,10 @@ class RouteCalculation:
         # Coverage analysis
         if raw_path:
             coverage_percent = (valid_entries / len(raw_path)) * 100 if raw_path else 0
-            print(f"\nRoute coverage: {coverage_percent:.1f}% ({valid_entries}/{len(raw_path)} frames have route data)")
+            print(f"\nRoute coverage: {coverage_percent:.1f}% ({valid_entries}/{len(raw_path)} seconds have route data)")
         
         print("="*80 + "\n")
-        logger.info(f"Frame trajectory analysis: {len(filtered_data)} filtered entries, {valid_entries}/{len(raw_path)} frames with route data")
+        logger.info(f"Frame trajectory analysis: {len(filtered_data)} filtered entries, {valid_entries}/{len(raw_path)} seconds with route data")
     
     def _is_valid_route_line(self, line: str) -> bool:
         """Check if a route line is valid (has pose data, not just index)."""
@@ -231,46 +231,36 @@ class RouteCalculation:
     
     def _build_raw_path(self, frame_paths: List[Path], filtered_data: Dict[int, Tuple[float, str]]) -> Dict[str, List]:
         """
-        Produce raw_path dict aligning filtered route data with selected frames.
+        Produce raw_path dict with one coordinate per second.
         
-        Uses filtered frame_trajectory data (one entry per second) and matches it
-        to frames based on their time_in_video.
+        Uses filtered frame_trajectory data (one entry per second) and creates
+        raw_path with rounded second values as keys and times.
+        
+        Args:
+            frame_paths: List of frame paths (used for logging only)
+            filtered_data: Dict mapping second index -> (frame_time, route_line)
+        
+        Returns:
+            Dict with structure: {"0": [0.0, "coords"], "1": [1.0, "coords"], ...}
         """
         raw_path: Dict[str, List] = {}
         
-        logger.info(f"Building raw_path for {len(frame_paths)} frames using {len(filtered_data)} filtered route entries")
+        logger.info(f"Building raw_path from {len(filtered_data)} filtered route entries (one per second)")
         
-        for idx, frame_path in enumerate(frame_paths):
-            suffix = self._extract_suffix(frame_path)
-            # Calculate time_in_video based on suffix and candidates_per_second
-            # Stella frames are 12fps, so suffix values are 0, 1, 2, 3, ... (consecutive)
-            # Time in video = suffix / candidates_per_second (12)
-            # Example: suffix 0 = 0.000s, suffix 12 = 1.000s, suffix 24 = 2.000s
-            time_in_video = (
-                suffix / float(self.candidates_per_second)
-                if suffix is not None and self.candidates_per_second
-                else float(idx) / float(self.candidates_per_second) if self.candidates_per_second else float(idx)
-            )
+        # Iterate over filtered_data which already has one entry per second
+        for second_index, (frame_time, line) in sorted(filtered_data.items()):
+            # Key is the second index as string (0, 1, 2, ...)
+            # Time is the rounded second value (0.0, 1.0, 2.0, ...)
+            rounded_time = float(second_index)
             
-            # Use floor() to match the filtering logic - ensures we never round up
-            # to a frame index that will not exist
-            time_index = math.floor(time_in_video)
+            # Remove null characters (\u0000) that cause PostgreSQL text field errors
+            cleaned_line = line.replace('\u0000', '').replace('\x00', '')
             
-            # Debug logging for first 10 frames
-            if idx < 10:
-                logger.debug(f"Frame {idx}: path={frame_path.name}, suffix={suffix}, time_in_video={time_in_video:.3f}s, time_index={time_index}")
+            raw_path[str(second_index)] = [rounded_time, cleaned_line]
             
-            # Get the route line for this time index
-            if time_index in filtered_data:
-                frame_time, line = filtered_data[time_index]
-                # Remove null characters (\u0000) that cause PostgreSQL text field errors
-                line = line.replace('\u0000', '').replace('\x00', '')
-            else:
-                # If no route data for this second, use empty string
-                logger.debug(f"Frame {idx} (time {time_in_video:.3f}s, index {time_index}): no route data found")
-                line = ""
-            
-            raw_path[str(idx)] = [time_in_video, line]
+            # Debug logging for first 10 entries
+            if second_index < 10:
+                logger.debug(f"Second {second_index}: time={rounded_time:.1f}s, frame_time={frame_time:.3f}s, line={cleaned_line[:60]}...")
         
         # Log statistics
         valid_count = sum(1 for entry in raw_path.values() if entry[1] and entry[1].strip())

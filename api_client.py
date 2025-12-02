@@ -685,6 +685,39 @@ class APIClient:
             logger.warning("Cannot update video frames: missing video_id or raw_path")
             return 0
         
+        # First, collect all x and y coordinates to calculate normalization range
+        x_values = []
+        y_values = []
+        for raw_path_entry in raw_path.values():
+            if not raw_path_entry or len(raw_path_entry) < 2:
+                continue
+            coords_line = raw_path_entry[1]
+            try:
+                parts = coords_line.split()
+                if len(parts) >= 3:
+                    x_values.append(float(parts[1]))
+                    y_values.append(float(parts[2]))
+            except (ValueError, IndexError):
+                continue
+        
+        if not x_values or not y_values:
+            logger.warning("No valid coordinates found in raw_path for normalization")
+            return 0
+        
+        # Calculate min and max for normalization
+        x_min, x_max = min(x_values), max(x_values)
+        y_min, y_max = min(y_values), max(y_values)
+        
+        # Normalize function: maps value from [min, max] to [0.0, 1.0]
+        def normalize(value: float, v_min: float, v_max: float) -> float:
+            if v_max == v_min:
+                return 0.5  # If all values are the same, return middle value
+            normalized = (value - v_min) / (v_max - v_min)
+            # Clamp to [0.0, 1.0] to ensure valid range
+            return max(0.0, min(1.0, normalized))
+        
+        logger.info(f"Normalizing coordinates: x range [{x_min:.6f}, {x_max:.6f}], y range [{y_min:.6f}, {y_max:.6f}]")
+        
         # Fetch all video frames
         if update_status_callback:
             update_status_callback("Fetching video frames for camera position update...")
@@ -726,8 +759,12 @@ class APIClient:
                     failed_count += 1
                     continue
                 
-                rx = float(parts[1])  # x coordinate
-                ry = float(parts[2])  # y coordinate
+                x_coord = float(parts[1])  # x coordinate
+                y_coord = float(parts[2])  # y coordinate
+                
+                # Normalize to [0.0, 1.0] range
+                rx = normalize(x_coord, x_min, x_max)
+                ry = normalize(y_coord, y_min, y_max)
                 
                 frame_id = frame.get('uuid')
                 if not frame_id:

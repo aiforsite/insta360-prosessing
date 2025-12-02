@@ -84,7 +84,7 @@ class MediaServerAPIClient:
             logger.info(f"Fetched task: {task}")
             return task
         else:
-            logger.error("Failed to fetch task")
+            logger.info("No task found")
             return None
     
     def update_task_status(self, task_id: str, status: str, result: Optional[str] = None) -> bool:

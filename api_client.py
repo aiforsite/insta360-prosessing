@@ -38,6 +38,7 @@ class MediaServerAPIClient:
             Response JSON as dict if successful, None otherwise
         """
         url = f"{self.api_domain}{endpoint}"
+        logger.info(f"Making API request to {url} with method {method} and payload {kwargs}")
         
         for attempt in range(max_retries):
             try:
@@ -78,8 +79,8 @@ class MediaServerAPIClient:
             "worker_id": self.worker_id,
             "change_status": "false" if reset else "true"
         }
-        url = f"api/tasks/fetch"
-        task = self._api_request('POST', url, json=payload)
+        endpoint = f"api/tasks/fetch"
+        task = self._api_request('POST', endpoint, json=payload)
         if task:
             logger.info(f"Fetched task: {task}")
             return task

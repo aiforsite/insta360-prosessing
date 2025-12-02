@@ -159,7 +159,7 @@ class TestVideoProcessorMock(unittest.TestCase):
             'blur_people': False,
             'videos': []
         }
-        mock_api_instance.reset_video_recording_status.return_value = True
+        mock_api_instance.set_video_recording_status.return_value = True
         mock_api_instance.update_task_route.return_value = True
         mock_api_instance.mark_videos_for_deletion.return_value = True
         mock_api_instance.report_task_completion.return_value = True

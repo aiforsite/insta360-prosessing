@@ -87,13 +87,25 @@ class VideoProcessor:
         self.api_client = APIClient(default_api_domain, default_api_key)
         self.media_server_api_client = MediaServerAPIClient(media_server_api_domain, media_server_api_key, worker_id)
         
+        # Track current task status (valid values: "pending", "in_progress", "completed", "failed")
+        self.current_task_status = "in_progress"
+        
         # Create wrapper for status updates that automatically uses current task ID
-        def update_status_text(status_text: str):
-            """Update task status text using current task ID."""
+        def update_status_text(status_text: str, status: Optional[str] = None):
+            """Update task status text using current task ID.
+            
+            Args:
+                status_text: Status message text (goes to 'result' field)
+                status: Optional status value ("pending", "in_progress", "completed", "failed")
+                        If not provided, uses "in_progress" as default
+            """
             if self.api_client.current_task_id:
+                # Use provided status or default to "in_progress"
+                task_status = status or "in_progress"
                 self.media_server_api_client.update_task_status(
                     self.api_client.current_task_id,
-                    status_text
+                    task_status,
+                    result=status_text
                 )
         self.update_status_text = update_status_text
         self.file_ops = FileOperations(self.work_dir)
@@ -176,11 +188,17 @@ class VideoProcessor:
         if success:
             self.update_status_text("Reset: cleanup complete")
             if not test_mode:
-                self.api_client.report_task_completion(success=True)
+                self.api_client.set_video_recording_status(
+                    self.api_client.current_video_recording_id,
+                    status='completed'
+                )
         else:
             self.update_status_text("Reset: cleanup failed")
             if not test_mode:
-                self.api_client.report_task_completion(success=False, error="Reset cleanup failed")
+                self.api_client.set_video_recording_status(
+                    self.api_client.current_video_recording_id,
+                    status='failure'
+                )
         return success
     
     def process_task(self, task: Dict) -> bool:
@@ -192,11 +210,11 @@ class VideoProcessor:
         self.api_client.test_mode = False
         self.api_client.current_video_recording_id = task.get('details', {}).get('video_recording')
         logger.info(f"Processing task {self.api_client.current_task_id}")
-        self.update_status_text("Starting video processing task...")
+        self.update_status_text("Starting video processing task...", status="in_progress")
         
         # Update video-recording status to "processing"
         if self.api_client.current_video_recording_id:
-            self.api_client.reset_video_recording_status(
+            self.api_client.set_video_recording_status(
                 self.api_client.current_video_recording_id,
                 status='processing'
             )
@@ -329,15 +347,29 @@ class VideoProcessor:
             self.clean_local_directories()
             
             # Report success
-            self.update_status_text("Task complete, starting new task polling...")
-            self.api_client.report_task_completion(success=True)
+            self.update_status_text("Task complete, starting new task polling...", status="completed")
+            
+            # Update video-recording status to "ready_to_view" on success
+            if self.api_client.current_video_recording_id:
+                self.api_client.set_video_recording_status(
+                    self.api_client.current_video_recording_id,
+                    status='ready_to_view'
+                )
+            
             logger.info(f"Task {self.api_client.current_task_id} processed successfully")
             return True
             
         except Exception as e:
             logger.error(f"Task processing failed: {e}")
-            self.update_status_text(f"Error: {str(e)}")
-            self.api_client.report_task_completion(success=False, error=str(e))
+            self.update_status_text(f"Error: {str(e)}", status="failed")
+            
+            # Update video-recording status to "failure" on error
+            if self.api_client.current_video_recording_id:
+                self.api_client.set_video_recording_status(
+                    self.api_client.current_video_recording_id,
+                    status='failure'
+                )
+            
             self.clean_local_directories()
             return False
     
@@ -390,17 +422,25 @@ class VideoProcessor:
                 # This is expected behavior
                 try:
                     success = self.process_task(task)
-                    # process_task already calls report_task_completion, but ensure it's done
                     if success:
                         logger.info("Test mode: Ensuring completion status is set...")
-                        self.api_client.report_task_completion(success=True)
+                        self.api_client.set_video_recording_status(
+                            self.api_client.current_video_recording_id,
+                            status='completed'
+                        )
                         logger.info("Test mode: Task processing completed successfully")
                     else:
                         logger.error("Test mode: Task processing failed")
-                        self.api_client.report_task_completion(success=False, error="Processing failed in test mode")
+                        self.api_client.set_video_recording_status(
+                            self.api_client.current_video_recording_id,
+                            status='failure'
+                        )
                 except Exception as e:
                     logger.error(f"Test mode: Exception during processing: {e}")
-                    self.api_client.report_task_completion(success=False, error=str(e))
+                    self.api_client.set_video_recording_status(
+                        self.api_client.current_video_recording_id,
+                        status='failure'
+                    )
                 logger.info("Test mode complete (reset + processing done)")
             else:
                 logger.warning("No processing task found in test mode")

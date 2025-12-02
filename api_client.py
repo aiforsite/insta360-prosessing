@@ -682,13 +682,13 @@ class APIClient:
         )
         return result is not None
 
-    def reset_video_recording_status(self, video_recording_id: str, status: str = 'created') -> bool:
-        """Reset video-recording status (used in test mode to avoid cascade deletion)."""
+    def set_video_recording_status(self, video_recording_id: str, status: str = 'created') -> bool:
+        """Set video-recording status."""
         if not video_recording_id:
-            logger.warning("Cannot reset video-recording status: missing video_recording_id")
+            logger.warning("Cannot set video-recording status: missing video_recording_id")
             return False
         
-        logger.info(f"Resetting video-recording {video_recording_id} status to {status}...")
+        logger.info(f"Setting video-recording {video_recording_id} status to {status}...")
         result = self._api_request(
             'PATCH',
             f'/api/v1/video-recording/{video_recording_id}',
@@ -762,52 +762,7 @@ class APIClient:
         else:
             logger.warning("Failed to create one or both FileDeleteSchedule objects")
             return False
-    
-    def report_task_completion(self, success: bool, error: Optional[str] = None, waiting_for_route: bool = False, details: Optional[Dict[str, Any]] = None):
-        """Report task completion to API."""
-        if not self.current_task_id:
-            logger.warning("Cannot report completion: no current task ID")
-            return
         
-        logger.info(f"Reporting task completion: success={success}, waiting_for_route={waiting_for_route}")
-        
-        # Determine status: if waiting for route, use "waiting_for_route_calculation", otherwise "completed" or "failed"
-        if success and waiting_for_route:
-            status = 'waiting_for_route_calculation'
-        elif success:
-            status = 'completed'
-        else:
-            status = 'failed'
-        
-        # Update process-recording-task status
-        payload: Dict[str, Any] = {'status': status}
-        if details is not None:
-            payload['details'] = details
-        task_result = self._api_request(
-            'PATCH',
-            f'/api/v1/process-recording-task/{self.current_task_id}',
-            json=payload
-        )
-        
-        # Update video-recording status to "ready_to_view" (if success)
-        if success and self.current_video_recording_id:
-            video_result = self._api_request(
-                'PATCH',
-                f'/api/v1/video-recording/{self.current_video_recording_id}',
-                json={'status': 'ready_to_view'}
-            )
-            if video_result:
-                logger.info("Video-recording status updated to ready_to_view")
-            else:
-                logger.warning("Failed to update video-recording status")
-        elif not success:
-            logger.info("Skipping video-recording status update due to failure")
-        
-        if task_result:
-            logger.info(f"Process-recording-task status updated: {status}")
-        else:
-            logger.warning("Failed to update process-recording-task status")
-    
     def _extract_image_id(self, image_field) -> Optional[str]:
         """Helper to extract UUID from image reference."""
         if not image_field:
@@ -881,7 +836,7 @@ class APIClient:
         if test_mode:
             # In test mode, reset status instead of deleting to avoid cascade deletion of process-recording-task
             update_status_callback("Reset: resetting video-recording status")
-            self.reset_video_recording_status(video_recording_id, status=test_reset_status)
+            self.set_video_recording_status(video_recording_id, status=test_reset_status)
             logger.info(f"Reset cleanup finished for video-recording {video_recording_id} (status reset to {test_reset_status})")
         else:
             # In normal reset mode, delete the video-recording

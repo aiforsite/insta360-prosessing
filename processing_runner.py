@@ -86,7 +86,16 @@ class VideoProcessor:
         # Initialize modules (API client can be updated per task)
         self.api_client = APIClient(default_api_domain, default_api_key)
         self.media_server_api_client = MediaServerAPIClient(media_server_api_domain, media_server_api_key, worker_id)
-        self.update_status_text = self.media_server_api_client.update_task_status  # direct alias
+        
+        # Create wrapper for status updates that automatically uses current task ID
+        def update_status_text(status_text: str):
+            """Update task status text using current task ID."""
+            if self.api_client.current_task_id:
+                self.media_server_api_client.update_task_status(
+                    self.api_client.current_task_id,
+                    status_text
+                )
+        self.update_status_text = update_status_text
         self.file_ops = FileOperations(self.work_dir)
         self.video_processing = VideoProcessing(self.work_dir, mediasdk_executable, stitch_config)
         self.frame_processing = FrameProcessing(self.work_dir, self.candidates_per_second, self.low_res_fps, self.blur_settings)

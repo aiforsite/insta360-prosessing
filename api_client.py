@@ -631,6 +631,126 @@ class APIClient:
             return False
         logger.info(f"Deleted video frame {frame_id}")
         return True
+    
+    def update_video_frame_camera_position(self, frame_id: str, rx: float, ry: float, layer_id: str) -> bool:
+        """Update video frame camera_layer_position with rx, ry, and layer.
+        
+        Args:
+            frame_id: Video frame UUID
+            rx: X coordinate (rotation/position)
+            ry: Y coordinate (rotation/position)
+            layer_id: Layer UUID
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not frame_id:
+            logger.warning("Cannot update video frame: missing frame_id")
+            return False
+        
+        payload = {
+            'camera_layer_position': {
+                'rx': rx,
+                'ry': ry,
+                'layer': layer_id
+            }
+        }
+        
+        result = self._api_request(
+            'PATCH',
+            f'/api/v1/video-frame/{frame_id}/',
+            json=payload
+        )
+        
+        if result is not None:
+            logger.debug(f"Updated video frame {frame_id} camera position: rx={rx}, ry={ry}")
+            return True
+        else:
+            logger.warning(f"Failed to update video frame {frame_id} camera position")
+            return False
+    
+    def update_video_frames_from_raw_path(self, video_id: str, raw_path: Dict, layer_id: str, update_status_callback=None) -> int:
+        """Update all video frames with camera_layer_position from raw_path.
+        
+        Args:
+            video_id: Video UUID
+            raw_path: Dict with structure {"0": [0.0, "timestamp x y z ..."], "1": [1.0, "..."], ...}
+            layer_id: Layer UUID
+            update_status_callback: Optional status update callback
+        
+        Returns:
+            Number of frames updated successfully
+        """
+        if not video_id or not raw_path:
+            logger.warning("Cannot update video frames: missing video_id or raw_path")
+            return 0
+        
+        # Fetch all video frames
+        if update_status_callback:
+            update_status_callback("Fetching video frames for camera position update...")
+        frames = self.fetch_video_frames(video_id)
+        
+        if not frames:
+            logger.warning(f"No video frames found for video {video_id}")
+            return 0
+        
+        logger.info(f"Updating {len(frames)} video frames with camera positions from raw_path...")
+        
+        updated_count = 0
+        failed_count = 0
+        
+        for frame in frames:
+            time_in_video = frame.get('time_in_video')
+            if time_in_video is None:
+                logger.warning(f"Video frame {frame.get('uuid')} missing time_in_video, skipping")
+                failed_count += 1
+                continue
+            
+            # Convert time_in_video to second index (round down)
+            second_index = str(int(math.floor(time_in_video)))
+            
+            # Get raw_path entry for this second
+            raw_path_entry = raw_path.get(second_index)
+            if not raw_path_entry or len(raw_path_entry) < 2:
+                logger.debug(f"No raw_path data for second {second_index} (time_in_video={time_in_video})")
+                failed_count += 1
+                continue
+            
+            # Parse coordinates from raw_path line
+            # Format: "timestamp x y z qx qy qz qw"
+            coords_line = raw_path_entry[1]
+            try:
+                parts = coords_line.split()
+                if len(parts) < 3:
+                    logger.warning(f"Invalid raw_path line for second {second_index}: {coords_line[:50]}")
+                    failed_count += 1
+                    continue
+                
+                rx = float(parts[1])  # x coordinate
+                ry = float(parts[2])  # y coordinate
+                
+                frame_id = frame.get('uuid')
+                if not frame_id:
+                    logger.warning(f"Video frame missing UUID, skipping")
+                    failed_count += 1
+                    continue
+                
+                # Update frame
+                if self.update_video_frame_camera_position(frame_id, rx, ry, layer_id):
+                    updated_count += 1
+                else:
+                    failed_count += 1
+                    
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Failed to parse coordinates from raw_path for second {second_index}: {e}")
+                failed_count += 1
+                continue
+        
+        logger.info(f"Updated {updated_count}/{len(frames)} video frames with camera positions ({failed_count} failed)")
+        if update_status_callback:
+            update_status_callback(f"Updated {updated_count} video frames with camera positions")
+        
+        return updated_count
 
     def delete_video(self, video_id: Optional[str]) -> bool:
         """Delete video asset."""

@@ -354,6 +354,23 @@ class VideoProcessor:
                         self.api_client.update_task_route(self.processed_video_id, raw_path)
                     else:
                         logger.warning("Cannot update raw_path: processed video ID not available")
+                    
+                    # Update video frames with camera_layer_position from raw_path
+                    layer_id = video_recording.get('layer')
+                    if layer_id and self.processed_video_id:
+                        self.update_status_text("Updating video frames with camera positions from route data...")
+                        updated_count = self.api_client.update_video_frames_from_raw_path(
+                            self.processed_video_id,
+                            raw_path,
+                            layer_id,
+                            self.update_status_text
+                        )
+                        logger.info(f"Updated {updated_count} video frames with camera positions")
+                    else:
+                        if not layer_id:
+                            logger.warning("Cannot update video frames: missing layer_id")
+                        if not self.processed_video_id:
+                            logger.warning("Cannot update video frames: missing processed_video_id")
                 else:
                     logger.warning("Route data returned without raw_path information")
             

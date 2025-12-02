@@ -67,6 +67,7 @@ class VideoProcessor:
         self.low_res_fps = self.config['low_res_frames_per_second']
         self.route_fps = self.config['route_calculation_fps']
         self.candidates_per_second = self.config.get('candidates_per_second', 12)
+        self.frame_upload_parallelism = self.config.get('frame_upload_parallelism', 8)
         
         # General processing configuration
         self.polling_interval = self.config['polling_interval']
@@ -321,7 +322,8 @@ class VideoProcessor:
                 stitched_video_id,
                 self.api_client,
                 self.update_status_text,
-                layer_id=layer_id
+                layer_id=layer_id,
+                max_workers=self.frame_upload_parallelism
             )
             
             # Step 8: Create 12fps frames for Stella route calculation

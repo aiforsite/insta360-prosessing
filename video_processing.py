@@ -348,7 +348,7 @@ class VideoProcessing:
             # MediaSDKTest.exe may not add proper 360 metadata, so we add it here
             # This ensures the video is recognized as 360-degree equirectangular by players
             logger.info("Adding 360 metadata to stitched video...")
-            update_status_callback("Lisätään 360-metadataa videoon...")
+            update_status_callback("Adding 360 metadata to video...")
             
             temp_output = output_path.with_suffix('.temp' + output_path.suffix)
             try:
@@ -425,15 +425,15 @@ class VideoProcessing:
                         logger.warning(f"Re-encode mode failed: {ffmpeg_result.stderr if ffmpeg_result else 'No output'}")
                         if temp_output.exists():
                             temp_output.unlink()
-                        update_status_callback("Varoitus: 360-metadataa ei voitu lisätä, käytetään alkuperäistä videota")
+                        update_status_callback("Warning: Could not add 360 metadata, using original video")
                 except (subprocess.TimeoutExpired, FileNotFoundError) as e2:
                     logger.warning(f"Could not add 360 metadata (ffmpeg not available or timeout): {e2}")
                     if temp_output.exists():
                         temp_output.unlink()
-                    update_status_callback("Varoitus: 360-metadataa ei voitu lisätä")
+                    update_status_callback("Warning: Could not add 360 metadata")
             
             logger.info(f"Videos stitched successfully to {output_path}")
-            update_status_callback("Stitchaus valmis")
+            update_status_callback("Stitching complete")
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"Stitching failed with exit code {e.returncode}")
@@ -442,7 +442,7 @@ class VideoProcessing:
             if e.stderr:
                 logger.error(f"stderr: {e.stderr}")
             
-            update_status_callback(f"Virhe stitchauksessa: {e.stderr or str(e)}")
+            update_status_callback(f"Error in stitching: {e.stderr or str(e)}")
             return False
         except Exception as e:
             logger.error(f"Stitching failed: {e}")

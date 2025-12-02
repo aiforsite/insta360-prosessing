@@ -6,6 +6,7 @@ import logging
 import shutil
 import subprocess
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -262,7 +263,7 @@ class FrameProcessing:
     
     def create_and_select_frames(self, stitched_path: Path, update_status_callback) -> Tuple[List[Path], List[Path]]:
         """Extract 1fps frames (high and low res) for API storage."""
-        update_status_callback(f"Luodaan framet ({self.low_res_fps}/s) stitchatusta tiedostosta...")
+        update_status_callback(f"Creating frames ({self.low_res_fps}/s) from stitched file...")
         
         high_dir = self.work_dir / "high_frames"
         low_dir = self.work_dir / "low_frames"
@@ -320,7 +321,7 @@ class FrameProcessing:
             final_high.append(new_high)
             final_low.append(new_low)
         
-        update_status_callback(f"Valittu {len(final_high)} parasta framea ({self.low_res_fps}/s)")
+        update_status_callback(f"Selected {len(final_high)} best frames ({self.low_res_fps}/s)")
         return final_high, final_low
     
     def blur_frames_optional(self, high_frames: List[Path], low_frames: List[Path], blur_people: bool, update_status_callback) -> Tuple[List[Path], List[Path]]:
@@ -330,7 +331,7 @@ class FrameProcessing:
             return high_frames, low_frames
         
         logger.info("Applying GPU-assisted blur to frames...")
-        update_status_callback("Tehdään henkilötunnistus ja blurraus...")
+        update_status_callback("Detecting people and applying blur...")
         
         detector_available = self._person_detector is not None
         if not detector_available and not self.blur_settings.get('fallback_full_frame', True):
@@ -383,17 +384,27 @@ class FrameProcessing:
                 blurred_low.append(blurred_low_path)
             
             logger.info(f"Blurred {len(blurred_high)} frame pairs")
-            update_status_callback(f"Blurrattu {len(blurred_high)} framea")
+            update_status_callback(f"Blurred {len(blurred_high)} frames")
             return blurred_high, blurred_low
         except Exception as e:
             logger.error(f"Frame blurring failed: {e}")
-            update_status_callback(f"Virhe frame blurrauksessa: {str(e)}")
+            update_status_callback(f"Error in frame blurring: {str(e)}")
             return high_frames, low_frames
     
-    def upload_frames_to_cloud(self, frame_paths: List[Path], project_id: str, video_id: Optional[str], api_client, update_status_callback, layer_id: Optional[str] = None) -> List[Dict]:
-        """Save frames to cloud and create frame objects."""
+    def upload_frames_to_cloud(self, frame_paths: List[Path], project_id: str, video_id: Optional[str], api_client, update_status_callback, layer_id: Optional[str] = None, max_workers: int = 5) -> List[Dict]:
+        """Save frames to cloud and create frame objects using parallel uploads.
+        
+        Args:
+            frame_paths: List of frame paths to upload
+            project_id: Project ID
+            video_id: Video ID
+            api_client: API client instance
+            update_status_callback: Status update callback
+            layer_id: Optional layer ID
+            max_workers: Number of parallel upload workers (default: 5)
+        """
         logger.info("Uploading frames to cloud...")
-        update_status_callback(f"Tallennetaan {len(frame_paths)} framea pilveen ja luodaan frame objektit...")
+        update_status_callback(f"Saving {len(frame_paths)} frames to cloud and creating frame objects...")
 
         if not video_id:
             logger.error("Cannot upload frames: missing target video_id")
@@ -409,7 +420,8 @@ class FrameProcessing:
             'blurred_low': None
         })
         
-        for i, frame_path in enumerate(frame_paths):
+        def upload_single_frame(frame_path: Path, index: int) -> Optional[Dict]:
+            """Upload a single frame and return frame object."""
             try:
                 # Read image binary
                 with open(frame_path, 'rb') as f:
@@ -432,29 +444,57 @@ class FrameProcessing:
                     frame_obj = {
                         'uuid': image_id,
                         'type': image_type,
-                        'path': str(frame_path)
+                        'path': str(frame_path),
+                        'index': index,
+                        'suffix': self._extract_suffix(frame_path)
                     }
-                    frame_objects.append(frame_obj)
-                    
-                    # Update progress
-                    if (i + 1) % 10 == 0 or i == total - 1:
-                        update_status_callback(f"Tallennetaan frameja pilveen: {i + 1}/{total}")
+                    return frame_obj
                 else:
-                    logger.warning(f"Failed to store frame {i}")
-                    
-                suffix = self._extract_suffix(frame_path)
-                if suffix is not None and image_id:
-                    frame_collections[suffix][image_type] = image_id
-                    # Log in test mode
-                    if hasattr(api_client, 'test_mode') and api_client.test_mode:
-                        print(f"  Stored {image_type} image for suffix {suffix}: {image_id}")
-                elif suffix is None:
-                    logger.warning(f"Could not extract suffix from {frame_path}")
-                elif not image_id:
-                    logger.warning(f"Image ID is None for {frame_path}")
+                    logger.warning(f"Failed to store frame {index}")
+                    return None
                     
             except Exception as e:
-                logger.error(f"Failed to upload frame {i}: {e}")
+                logger.error(f"Failed to upload frame {index}: {e}")
+                return None
+        
+        # Upload frames in parallel
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all upload tasks
+            future_to_index = {
+                executor.submit(upload_single_frame, frame_path, i): i
+                for i, frame_path in enumerate(frame_paths)
+            }
+            
+            # Process completed uploads as they finish
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    frame_obj = future.result()
+                    if frame_obj:
+                        frame_objects.append(frame_obj)
+                        
+                        # Update frame collections
+                        suffix = frame_obj.get('suffix')
+                        image_type = frame_obj.get('type')
+                        if suffix is not None:
+                            frame_collections[suffix][image_type] = frame_obj['uuid']
+                            # Log in test mode
+                            if hasattr(api_client, 'test_mode') and api_client.test_mode:
+                                print(f"  Stored {image_type} image for suffix {suffix}: {frame_obj['uuid']}")
+                        
+                        completed += 1
+                        # Update progress every 10 frames or at the end
+                        if completed % 10 == 0 or completed == total:
+                            update_status_callback(f"Saving frames to cloud: {completed}/{total}")
+                except Exception as e:
+                    logger.error(f"Error processing upload result for frame {index}: {e}")
+        
+        # Sort frame_objects by original index to maintain order
+        frame_objects.sort(key=lambda x: x.get('index', 0))
+        # Remove index from final objects
+        for obj in frame_objects:
+            obj.pop('index', None)
         
         logger.info(f"Uploaded {len(frame_objects)} frames")
         update_status_callback(f"Saved {len(frame_objects)} frames to cloud")
@@ -487,7 +527,7 @@ class FrameProcessing:
             return saved_frame_ids
         
         sorted_suffixes = sorted(frame_collections.keys())
-        update_status_callback("Tallennetaan video frame objektit...")
+        update_status_callback("Saving video frame objects...")
         
         frame_entries: List[Dict] = []
         total = len(sorted_suffixes)
@@ -604,7 +644,7 @@ class FrameProcessing:
             if frame_uuid:
                 saved_frame_ids.append(frame_uuid)
                 if (idx + 1) % 5 == 0 or idx == total - 1:
-                    update_status_callback(f"Yksittäistallennus: {idx + 1}/{total}")
+                    update_status_callback(f"Individual save: {idx + 1}/{total}")
             else:
                 logger.warning(f"Failed to create video frame (fallback) for suffix {entry['suffix']}")
         
@@ -622,7 +662,7 @@ class FrameProcessing:
         Returns:
             List of frame paths for Stella
         """
-        update_status_callback("Luodaan 12fps framet Stellan reitin laskentaan...")
+        update_status_callback("Creating 12fps frames for Stella route calculation...")
         
         stella_dir = self.work_dir / "stella_frames"
         stella_dir.mkdir(parents=True, exist_ok=True)

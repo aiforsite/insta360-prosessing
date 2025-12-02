@@ -142,7 +142,7 @@ class VideoProcessor:
         # Update API client credentials from task
         self._update_api_client_from_task(task)
         
-        task_id = task.get('id')
+        task_id = task.get('task_id')
         video_recording_id = task.get('video_recording')
         self.api_client.current_task_id = task_id
         self.api_client.current_video_recording_id = video_recording_id
@@ -179,7 +179,7 @@ class VideoProcessor:
         # Update API client credentials from task
         self._update_api_client_from_task(task)
         
-        self.api_client.current_task_id = task.get('id')
+        self.api_client.current_task_id = task.get('task_id')
         self.api_client.test_mode = False
         self.api_client.current_video_recording_id = task.get('details', {}).get('video_recording')
         logger.info(f"Processing task {self.api_client.current_task_id}")
@@ -402,7 +402,7 @@ class VideoProcessor:
         while True:
             try:
                 task = self.media_server_api_client.fetch_next_task(reset=effective_reset)
-                task_id = task.get('id') if task else None
+                task_id = task.get('task_id') if task else None
                 if task and task_id:
                     logger.info(f"Found task: {task_id}")
                     if effective_reset:

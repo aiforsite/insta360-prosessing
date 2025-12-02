@@ -89,11 +89,11 @@ class MediaServerAPIClient:
     
     def update_task_status(self, task_id: str, status: str, result: Optional[str] = None) -> bool:
         """Update task status in Media Server API."""
-        url = f"/tasks/{task_id}/"
+        endpoint = f"/api/tasks/{task_id}/"
         payload = {"status": status}
         if result is not None:
             payload["result"] = result
-        self._api_request('PATCH', url, json=payload)
+        self._api_request('PATCH', endpoint, json=payload)
         if result is not None:
             logger.info(f"Task {task_id} status set succesfully to {status}")
         else:

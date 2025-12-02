@@ -408,10 +408,60 @@ class RouteCalculation:
             # Relative path, just normalize separators
             return path.replace('\\', '/')
         
+        # Verify WSL and Docker are available when using Docker
+        def verify_wsl_docker():
+            """Verify that WSL and Docker are available."""
+            try:
+                # Check if WSL is available
+                wsl_check = subprocess.run(
+                    ['wsl', '--list', '--quiet'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if wsl_check.returncode != 0:
+                    raise Exception("WSL is not available or not properly configured")
+                
+                # Check if Docker is available in WSL
+                docker_check = subprocess.run(
+                    ['wsl', 'docker', '--version'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if docker_check.returncode != 0:
+                    raise Exception("Docker is not available in WSL")
+                
+                logger.info("WSL and Docker verified successfully")
+                return True
+            except FileNotFoundError:
+                raise Exception("WSL command not found in PATH. Make sure WSL is installed and in system PATH.")
+            except subprocess.TimeoutExpired:
+                raise Exception("WSL or Docker check timed out")
+            except Exception as e:
+                raise Exception(f"WSL/Docker verification failed: {e}")
+        
         # Build command based on execution method
         if self.use_docker:
+            # Verify WSL and Docker are available
+            try:
+                verify_wsl_docker()
+            except Exception as e:
+                error_msg = f"WSL/Docker verification failed: {e}"
+                logger.error(error_msg)
+                # Clean error message for status update
+                cleaned_error = str(e).replace('\u0000', '').replace('\x00', '').replace('\r', ' ').replace('\n', ' ').strip()
+                update_status_callback(f"Error: {cleaned_error}")
+                return None
+            
             # Docker execution via WSL: mount work_dir to /data in container
+            # Use absolute path and ensure it exists
             work_dir_abs = str(self.work_dir.resolve())
+            if not self.work_dir.exists():
+                error_msg = f"Work directory does not exist: {work_dir_abs}"
+                logger.error(error_msg)
+                update_status_callback(f"Error: {error_msg}")
+                return None
             work_dir_wsl = to_wsl_path(work_dir_abs)
             
             # Paths inside container
@@ -498,11 +548,29 @@ class RouteCalculation:
         
         logger.info(f"Running Stella VSLAM command: {' '.join(cmd)}")
         try:
+            # Set working directory to ensure relative paths work correctly
+            # Use absolute path for work_dir
+            # For Task Scheduler compatibility, ensure PATH includes system directories
+            env = os.environ.copy()
+            # Add common WSL/Docker paths if not already in PATH
+            system_paths = [
+                r'C:\Windows\System32',
+                r'C:\Windows',
+                r'C:\Windows\System32\WindowsPowerShell\v1.0'
+            ]
+            current_path = env.get('PATH', '')
+            for path in system_paths:
+                if path not in current_path:
+                    current_path = f"{path};{current_path}"
+            env['PATH'] = current_path
+            
             result = subprocess.run(
                 cmd,
                 check=True,
                 capture_output=True,
-                text=True
+                text=True,
+                cwd=str(self.work_dir.resolve()) if self.work_dir.exists() else None,
+                env=env
             )
             
             if result.stdout:
@@ -626,7 +694,13 @@ class RouteCalculation:
                 logger.error(f"stdout: {e.stdout}")
             if e.stderr:
                 logger.error(f"stderr: {e.stderr}")
-            update_status_callback(f"Error in route calculation: {e.stderr or str(e)}")
+            
+            # Clean error message: remove null characters and other control characters
+            error_msg = e.stderr or str(e) if e else "Unknown error"
+            cleaned_error = error_msg.replace('\u0000', '').replace('\x00', '').replace('\r', ' ').replace('\n', ' ').strip()
+            if len(cleaned_error) > 200:
+                cleaned_error = cleaned_error[:197] + "..."
+            update_status_callback(f"Error in route calculation: {cleaned_error}")
             return None
         except Exception as e:
             logger.error(f"Route calculation failed: {e}")

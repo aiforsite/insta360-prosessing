@@ -108,12 +108,18 @@ class VideoProcessor:
             if self.api_client.current_task_id:
                 # Only update if text changed or forced
                 if force or status_text != self.last_status_text:
+                    # Clean status text: remove null characters and other control characters
+                    cleaned_text = status_text.replace('\u0000', '').replace('\x00', '').replace('\r', ' ').replace('\n', ' ').strip()
+                    # Limit length to avoid issues
+                    if len(cleaned_text) > 500:
+                        cleaned_text = cleaned_text[:497] + "..."
+                    
                     # Use provided status or default to "in_progress"
                     task_status = status or "in_progress"
                     self.media_server_api_client.update_task_status(
                         self.api_client.current_task_id,
                         task_status,
-                        result=status_text
+                        result=cleaned_text
                     )
                     self.last_status_text = status_text
         self.update_status_text = update_status_text
@@ -400,7 +406,12 @@ class VideoProcessor:
             
         except Exception as e:
             logger.error(f"Task processing failed: {e}")
-            self.update_status_text(f"Error: {str(e)}", status="failed", force=True)
+            # Clean error message: remove null characters and other control characters
+            error_msg = str(e)
+            cleaned_error = error_msg.replace('\u0000', '').replace('\x00', '').replace('\r', ' ').replace('\n', ' ').strip()
+            if len(cleaned_error) > 200:
+                cleaned_error = cleaned_error[:197] + "..."
+            self.update_status_text(f"Error: {cleaned_error}", status="failed", force=True)
             
             # Update video-recording status to "failure" on error
             if self.api_client.current_video_recording_id:

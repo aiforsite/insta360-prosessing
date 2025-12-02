@@ -412,32 +412,70 @@ class RouteCalculation:
         def verify_wsl_docker():
             """Verify that WSL and Docker are available."""
             try:
-                # Check if WSL is available
-                wsl_check = subprocess.run(
-                    ['wsl', '--list', '--quiet'],
-                    capture_output=True,
-                    text=True,
-                    timeout=5
-                )
-                if wsl_check.returncode != 0:
-                    raise Exception("WSL is not available or not properly configured")
+                # Check if WSL is available - try multiple methods for Task Scheduler compatibility
+                wsl_available = False
+                
+                # Method 1: Try wsl --list --quiet (may fail in Task Scheduler)
+                try:
+                    wsl_check = subprocess.run(
+                        ['wsl', '--list', '--quiet'],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    # Accept any return code - wsl --list may return non-zero but WSL is still available
+                    wsl_available = True
+                    logger.debug("WSL check via --list succeeded")
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
+                
+                # Method 2: Try simple wsl command (more reliable in Task Scheduler)
+                if not wsl_available:
+                    try:
+                        wsl_check2 = subprocess.run(
+                            ['wsl', 'echo', 'test'],
+                            capture_output=True,
+                            text=True,
+                            timeout=5
+                        )
+                        if wsl_check2.returncode == 0:
+                            wsl_available = True
+                            logger.debug("WSL check via echo succeeded")
+                    except (FileNotFoundError, subprocess.TimeoutExpired):
+                        pass
+                
+                if not wsl_available:
+                    raise Exception("WSL command not found or not accessible. Make sure WSL is installed and in system PATH.")
                 
                 # Check if Docker is available in WSL
+                # Use --exec to ensure we're in WSL context
                 docker_check = subprocess.run(
-                    ['wsl', 'docker', '--version'],
+                    ['wsl', '--exec', 'docker', '--version'],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=10
                 )
                 if docker_check.returncode != 0:
-                    raise Exception("Docker is not available in WSL")
+                    # Try alternative: wsl docker --version (without --exec)
+                    docker_check2 = subprocess.run(
+                        ['wsl', 'docker', '--version'],
+                        capture_output=True,
+                        text=True,
+                        timeout=10
+                    )
+                    if docker_check2.returncode != 0:
+                        raise Exception("Docker is not available in WSL. Make sure Docker is installed in WSL.")
+                    else:
+                        logger.debug("Docker check via 'wsl docker' succeeded")
+                else:
+                    logger.debug("Docker check via 'wsl --exec docker' succeeded")
                 
                 logger.info("WSL and Docker verified successfully")
                 return True
             except FileNotFoundError:
                 raise Exception("WSL command not found in PATH. Make sure WSL is installed and in system PATH.")
             except subprocess.TimeoutExpired:
-                raise Exception("WSL or Docker check timed out")
+                raise Exception("WSL or Docker check timed out. This may indicate WSL is not running or Docker is not accessible.")
             except Exception as e:
                 raise Exception(f"WSL/Docker verification failed: {e}")
         

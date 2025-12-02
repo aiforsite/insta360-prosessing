@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
-from api_client import APIClient
+from api_client import APIClient, MediaServerAPIClient
 from file_operations import FileOperations
 from video_processing import VideoProcessing
 from frame_processing import FrameProcessing
@@ -37,9 +37,14 @@ class VideoProcessor:
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
-        api_domain = self.config.get('api_domain')
-        api_key = self.config.get('api_key')
-        mediasdk_executable = self.config.get('mediasdk_executable')
+        # API configuration (defaults from config, can be overridden by tasks)
+        default_api_domain = self.config.get('api_domain')
+        default_api_key = self.config.get('api_key')
+        media_server_api_key = self.config.get('media_server_api_key')
+        media_server_api_domain = self.config.get('media_server_api_domain')
+        worker_id = self.config.get('worker_id')
+        
+        # Stella configuration
         stella_exec = self.config.get('stella_executable')
         stella_config_path = self.config.get('stella_config_path')
         stella_vocab_path = self.config.get('stella_vocab_path')
@@ -49,27 +54,40 @@ class VideoProcessor:
         docker_image = self.config.get('stella_docker_image', 'stella_vslam-socket')
         docker_data_mount = self.config.get('stella_docker_data_mount', '/data')
         
-        if not api_domain or not api_key:
-            raise ValueError("api_domain and api_key must be set in config.json")
-        if not mediasdk_executable:
-            raise ValueError("mediasdk_executable must be set in config.json")
+        # Stitching configuration
+        mediasdk_executable = self.config.get('mediasdk_executable')
+        stitch_config = self.config.get('stitch_config', {})
         
-        self.polling_interval = self.config['polling_interval']
-        self.work_dir = Path(self.config['local_work_dir'])
-        self.frames_per_second = self.config['frames_per_second']
-        self.low_res_fps = self.config['low_res_frames_per_second']
-        self.route_fps = self.config['route_calculation_fps']
-        self.grace_period_days = self.config['video_deletion_grace_period_days']
-        self.candidates_per_second = self.config.get('candidates_per_second', 12)
-        
+        # Blur configuration
         self.blur_people = False  # Can be set from task data if needed
         self.blur_settings = self.config.get('blur_settings', {})
         
-        # Initialize modules
-        self.api_client = APIClient(api_domain, api_key)
-        self.update_status_text = self.api_client.update_status_text  # direct alias
+        # Frame configuration
+        self.frames_per_second = self.config['frames_per_second']
+        self.low_res_fps = self.config['low_res_frames_per_second']
+        self.route_fps = self.config['route_calculation_fps']
+        self.candidates_per_second = self.config.get('candidates_per_second', 12)
+        
+        # General processing configuration
+        self.polling_interval = self.config['polling_interval']
+        self.work_dir = Path(self.config['local_work_dir'])
+        self.grace_period_days = self.config['video_deletion_grace_period_days']
+        
+        # Validation
+        if not mediasdk_executable:
+            raise ValueError("mediasdk_executable must be set in config.json")
+        if not media_server_api_key:
+            raise ValueError("media_server_api_key must be set in config.json")
+        if not worker_id:
+            raise ValueError("worker_id must be set in config.json")
+        if not media_server_api_domain:
+            raise ValueError("media_server_api_domain must be set in config.json")
+        
+        # Initialize modules (API client can be updated per task)
+        self.api_client = APIClient(default_api_domain, default_api_key)
+        self.media_server_api_client = MediaServerAPIClient(media_server_api_domain, media_server_api_key, worker_id)
+        self.update_status_text = self.media_server_api_client.update_task_status  # direct alias
         self.file_ops = FileOperations(self.work_dir)
-        stitch_config = self.config.get('stitch_config', {})
         self.video_processing = VideoProcessing(self.work_dir, mediasdk_executable, stitch_config)
         self.frame_processing = FrameProcessing(self.work_dir, self.candidates_per_second, self.low_res_fps, self.blur_settings)
         self.route_calculation = RouteCalculation(
@@ -90,7 +108,7 @@ class VideoProcessor:
     def clean_local_directories(self):
         """Clean local directories for safety."""
         if self.api_client.current_task_id:
-            self.update_status_text("Siivotaan paikalliset hakemistot...")
+            self.update_status_text("Cleaning local directories...")
         self.file_ops.clean_local_directories()
         
         # Also clean stella_results directory if it exists
@@ -109,180 +127,21 @@ class VideoProcessor:
             except Exception as e:
                 logger.warning(f"Failed to clean stella_results directory: {e}")
     
-    def download_videos(self, task: Dict) -> tuple[Optional[Path], Optional[Path]]:
-        """Download front and back videos from video-recording data."""
-        # Fetch video-recording data from API
-        video_recording_id = self.api_client.current_video_recording_id
-        if not video_recording_id:
-            logger.error("Missing video_recording_id in task")
-            self.update_status_text("Virhe: video_recording_id puuttuu")
-            return None, None
-        
-        video_recording = self.api_client.fetch_video_recording(video_recording_id)
-        if not video_recording:
-            logger.error("Failed to fetch video-recording data")
-            self.update_status_text("Virhe: Video-recording datan haku epäonnistui")
-            return None, None
-        
-        return self.video_processing.download_videos(
-            video_recording,
-            self.api_client,
-            self.update_status_text
-        )
+    def _update_api_client_from_task(self, task: Dict):
+        """Update API client credentials from task data if available."""
+        api_domain = task.get('domain')
+        api_key = task.get('token')
+        if api_domain and api_key:
+            self.api_client.update_credentials(api_domain, api_key)
+            logger.info(f"Updated API client from task (domain: {api_domain})")
+        elif not self.api_client.api_domain or not self.api_client.api_key:
+            raise ValueError("API credentials missing: neither task nor config provides domain and token")
     
-    def upload_frames_to_cloud(self, frame_paths: list[Path], project_id: Optional[str] = None, video_id: Optional[str] = None, layer_id: Optional[str] = None) -> list[Dict]:
-        """Save frames to cloud and create frame objects."""
-        if not project_id:
-            # Try to get project_id from video_recording if available
-            if self.api_client.current_video_recording_id:
-                video_recording = self.api_client.fetch_video_recording(self.api_client.current_video_recording_id)
-                if video_recording:
-                    project_id = video_recording.get('project')
-                    if not layer_id:
-                        layer_id = video_recording.get('layer')
-        
-        if not project_id:
-            logger.error("No project_id available for frame upload")
-            self.update_status_text("Virhe: project_id puuttuu")
-            return []
-        
-        return self.frame_processing.upload_frames_to_cloud(
-            frame_paths,
-            project_id,
-            video_id,
-            self.api_client,
-            self.update_status_text,
-            layer_id=layer_id
-        )
-    
-    def create_stella_frames(self, stitched_path: Path) -> list[Path]:
-        """Create 12fps frames for Stella VSLAM route calculation."""
-        return self.frame_processing.create_stella_frames(
-            stitched_path,
-            self.update_status_text
-        )
-
-    def _extract_image_id(self, image_field) -> Optional[str]:
-        """Helper to extract UUID from image reference."""
-        if not image_field:
-            return None
-        if isinstance(image_field, dict):
-            return image_field.get('uuid') or image_field.get('id')
-        if isinstance(image_field, str):
-            return image_field
-        return None
-
-    def _delete_frame_and_images(self, frame: Dict) -> bool:
-        """Delete images linked to a frame, then delete the frame."""
-        frame_id = frame.get('uuid')
-        image_fields = [
-            'high_res_image',
-            'low_res_image',
-            'blur_high_image',
-            'blur_image'
-        ]
-        success = True
-        for field in image_fields:
-            image_id = self._extract_image_id(frame.get(field))
-            if image_id:
-                if not self.api_client.delete_image(image_id):
-                    success = False
-        if frame_id:
-            if not self.api_client.delete_video_frame(frame_id):
-                success = False
-        return success
-
-    def cleanup_video_recording_data(self, video_recording_id: str, test_mode: bool = False) -> bool:
-        """Delete videos, frames, and images associated with a video-recording."""
-        video_recording = self.api_client.fetch_video_recording(video_recording_id)
-        if not video_recording:
-            logger.error("Reset cleanup failed: video-recording not found")
-            return False
-
-        videos = video_recording.get('videos', [])
-        targets: List[Tuple[str, bool]] = []
-        # Categories to preserve (front and back raw videos)
-        preserve_categories = [
-            'video_insta360_raw_front',
-            'video_insta360_raw_back'
-        ]
-        
-        for video in videos:
-            video_uuid = video.get('uuid')
-            category = video.get('category')
-            # Skip front and back raw videos - don't delete them
-            if video_uuid and category not in preserve_categories:
-                targets.append((video_uuid, True))
-        # Frame entries may reference video_recording_id directly
-        targets.append((video_recording_id, False))
-
-        for video_id, delete_video_flag in targets:
-            self.update_status_text(f"Reset: poistetaan framet videolle {video_id}")
-            frames = self.api_client.fetch_video_frames(video_id)
-            for frame in frames:
-                self._delete_frame_and_images(frame)
-            if delete_video_flag:
-                self.update_status_text(f"Reset: poistetaan video {video_id}")
-                self.api_client.delete_video(video_id)
-
-        if test_mode:
-            # In test mode, reset status instead of deleting to avoid cascade deletion of process-recording-task
-            self.update_status_text("Reset: resetoidaan video-recording status")
-            reset_status = self.config.get('test_video_recording_reset_status', 'created')
-            self.api_client.reset_video_recording_status(video_recording_id, status=reset_status)
-            logger.info(f"Reset cleanup finished for video-recording {video_recording_id} (status reset to {reset_status})")
-        else:
-            # In normal reset mode, delete the video-recording
-            self.update_status_text("Reset: poistetaan video-recording")
-            self.api_client.delete_video_recording(video_recording_id)
-            logger.info(f"Reset cleanup finished for video-recording {video_recording_id}")
-        return True
-
-    def _select_fallback_video_id(self, video_recording: Optional[Dict]) -> Optional[str]:
-        """Choose an existing video UUID to associate frames if processed video missing."""
-        if not video_recording:
-            return None
-        videos = video_recording.get('videos', []) or []
-        preferred_categories = self.config.get('fallback_video_categories', [
-            'video_insta360_raw_front',
-            'video_insta360_raw_back'
-        ])
-        for category in preferred_categories:
-            for video in videos:
-                if video.get('category') == category and video.get('uuid'):
-                    return video.get('uuid')
-        if videos:
-            return videos[0].get('uuid')
-        return None
-
-    def store_processed_video(self, stitched_path: Path, project_id: str, video_recording: Optional[Dict]) -> Optional[str]:
-        """Upload stitched video binary to API and return video UUID."""
-        if not stitched_path.exists():
-            logger.warning(f"Processed video not found at {stitched_path}")
-            return None
-        try:
-            with open(stitched_path, 'rb') as f:
-                video_binary = f.read()
-            video_type = self.config.get('processed_video_category', 'video_insta360_processed_stitched')
-            video_name = stitched_path.name
-            video_recording_id = video_recording.get('uuid') if video_recording else self.api_client.current_video_recording_id
-            video_id = self.api_client.store_video(
-                project_id=project_id,
-                video_recording_id=video_recording_id,
-                video_type=video_type,
-                video_size=len(video_binary),
-                video_binary=video_binary,
-                name=video_name
-            )
-            if video_id:
-                logger.info(f"Stored processed stitched video with ID {video_id}")
-            return video_id
-        except Exception as exc:
-            logger.error(f"Failed to store processed video: {exc}")
-            return None
-
     def handle_reset_task(self, task: Dict, test_mode: bool = False) -> bool:
         """Process a reset task by cleaning API data."""
+        # Update API client credentials from task
+        self._update_api_client_from_task(task)
+        
         task_id = task.get('uuid')
         video_recording_id = task.get('video_recording')
         self.api_client.current_task_id = task_id
@@ -292,32 +151,39 @@ class VideoProcessor:
             logger.error("Reset task missing video_recording ID")
             return False
 
-        self.update_status_text("Reset: aloitetaan video-recordingin siivous")
-        success = self.cleanup_video_recording_data(video_recording_id, test_mode=test_mode)
+        self.update_status_text("Reset: starting video-recording cleanup")
+        preserve_categories = self.config.get('fallback_video_categories', [
+            'video_insta360_raw_front',
+            'video_insta360_raw_back'
+        ])
+        reset_status = self.config.get('test_video_recording_reset_status', 'created')
+        success = self.api_client.cleanup_video_recording_data(
+            video_recording_id,
+            self.update_status_text,
+            preserve_categories=preserve_categories,
+            test_mode=test_mode,
+            test_reset_status=reset_status
+        )
         if success:
-            self.update_status_text("Reset: siivous valmis")
+            self.update_status_text("Reset: cleanup complete")
             if not test_mode:
                 self.api_client.report_task_completion(success=True)
         else:
-            self.update_status_text("Reset: siivous epäonnistui")
+            self.update_status_text("Reset: cleanup failed")
             if not test_mode:
                 self.api_client.report_task_completion(success=False, error="Reset cleanup failed")
         return success
     
-    def calculate_route(self, frame_paths: list[Path]) -> Optional[Dict]:
-        """Calculate route using selected frames (Stella VSLAM) and update raw path."""
-        return self.route_calculation.calculate_route(
-            frame_paths,
-            self.update_status_text
-        )
-    
     def process_task(self, task: Dict) -> bool:
         """Process a single video task through all steps."""
+        # Update API client credentials from task
+        self._update_api_client_from_task(task)
+        
         self.api_client.current_task_id = task.get('uuid')
         self.api_client.test_mode = task.get('is_test', False)
         self.api_client.current_video_recording_id = task.get('video_recording')
         logger.info(f"Processing task {self.api_client.current_task_id}")
-        self.update_status_text("Aloitetaan videokäsittelytehtävä...")
+        self.update_status_text("Starting video processing task...")
         
         # Update video-recording status to "processing"
         if self.api_client.current_video_recording_id:
@@ -331,13 +197,22 @@ class VideoProcessor:
             self.clean_local_directories()
             
             # Step 3: Download videos
-            front_path, back_path = self.download_videos(task)
+            video_recording_id = self.api_client.current_video_recording_id
+            if not video_recording_id:
+                raise Exception("Missing video_recording_id in task")
+            
+            video_recording = self.api_client.fetch_video_recording(video_recording_id)
+            if not video_recording:
+                raise Exception("Failed to fetch video-recording data")
+            
+            front_path, back_path = self.video_processing.download_videos(
+                video_recording,
+                self.api_client,
+                self.update_status_text
+            )
             if not front_path or not back_path:
                 raise Exception("Failed to download videos")
 
-            video_recording = self.api_client.fetch_video_recording(self.api_client.current_video_recording_id)
-            if not video_recording:
-                raise Exception("Failed to reload video recording data")
             project_id = video_recording.get('project')
             if not project_id:
                 raise Exception("Video recording missing project reference")
@@ -356,9 +231,23 @@ class VideoProcessor:
             
             stitched_video_id = None
             if project_id:
-                stitched_video_id = self.store_processed_video(stitched_path, project_id, video_recording)
+                video_type = self.config.get('processed_video_category', 'video_insta360_processed_stitched')
+                stitched_video_id = self.video_processing.store_processed_video(
+                    stitched_path,
+                    project_id,
+                    video_recording,
+                    self.api_client,
+                    video_type=video_type
+                )
             if not stitched_video_id:
-                stitched_video_id = self._select_fallback_video_id(video_recording)
+                fallback_categories = self.config.get('fallback_video_categories', [
+                    'video_insta360_raw_front',
+                    'video_insta360_raw_back'
+                ])
+                stitched_video_id = self.video_processing.select_fallback_video_id(
+                    video_recording,
+                    fallback_categories=fallback_categories
+                )
             if not stitched_video_id:
                 raise Exception("Failed to determine target video_id for frames")
             self.processed_video_id = stitched_video_id
@@ -385,22 +274,29 @@ class VideoProcessor:
             )
             
             # Step 7: Upload frames to cloud
-            # Get project_id and layer from video_recording
             layer_id = video_recording.get('layer')
-            frame_objects = self.upload_frames_to_cloud(
+            frame_objects = self.frame_processing.upload_frames_to_cloud(
                 final_high + final_low,
-                project_id=project_id,
-                video_id=stitched_video_id,
+                project_id,
+                stitched_video_id,
+                self.api_client,
+                self.update_status_text,
                 layer_id=layer_id
             )
             
             # Step 8: Create 12fps frames for Stella route calculation
-            route_frames = self.create_stella_frames(stitched_path)
+            route_frames = self.frame_processing.create_stella_frames(
+                stitched_path,
+                self.update_status_text
+            )
             if not route_frames:
                 raise Exception("Failed to create Stella frames for route calculation")
             
             # Step 9: Calculate route using Stella VSLAM (via WSL if configured)
-            route_data = self.calculate_route(route_frames)
+            route_data = self.route_calculation.calculate_route(
+                route_frames,
+                self.update_status_text
+            )
             if route_data:
                 raw_path = route_data.get('raw_path')
                 if raw_path:
@@ -414,24 +310,24 @@ class VideoProcessor:
             
             # Step 10: Mark videos for deletion
             if self.api_client.current_task_id and not self.api_client.test_mode:
-                self.update_status_text(f"Merkataan front ja back video tuhottavaksi {self.grace_period_days} päivän päästä (varoaika)...")
+                self.update_status_text(f"Marking front and back videos for deletion in {self.grace_period_days} days (grace period)...")
                 result = self.api_client.mark_videos_for_deletion(self.grace_period_days)
                 if result:
-                    self.update_status_text("Videot merkitty poistettavaksi")
+                    self.update_status_text("Videos marked for deletion")
             
             # Step 11: Clean local directories
-            self.update_status_text("Siivotaan paikalliset hakemistot...")
+            self.update_status_text("Cleaning local directories...")
             self.clean_local_directories()
             
             # Report success
-            self.update_status_text("Tehtävä valmis, aloitetaan uuden tehtävän pollaus...")
+            self.update_status_text("Task complete, starting new task polling...")
             self.api_client.report_task_completion(success=True)
             logger.info(f"Task {self.api_client.current_task_id} processed successfully")
             return True
             
         except Exception as e:
             logger.error(f"Task processing failed: {e}")
-            self.update_status_text(f"Virhe: {str(e)}")
+            self.update_status_text(f"Error: {str(e)}")
             self.api_client.report_task_completion(success=False, error=str(e))
             self.clean_local_directories()
             return False
@@ -451,14 +347,14 @@ class VideoProcessor:
             if not self.test_task_uuid:
                 logger.error("Test mode requested but config.json missing test_task_uuid")
                 return
-            if self.api_client.set_task_status(self.test_task_uuid, 'pending'):
+            if self.media_server_api_client.update_task_status(self.test_task_uuid, 'pending'):
                 logger.info(f"Test task {self.test_task_uuid} reset to pending")
             else:
                 logger.warning(f"Failed to reset test task {self.test_task_uuid} to pending")
 
             # Test mode: first do reset, then normal processing
             logger.info("Test mode: Step 1 - Resetting and cleaning data...")
-            task = self.api_client.fetch_next_task(reset=True)
+            task = self.media_server_api_client.fetch_next_task(reset=True)
             task_id = task.get('uuid') if task else None
             if task and task_id:
                 logger.info(f"Found reset task: {task_id}")
@@ -470,14 +366,14 @@ class VideoProcessor:
             
             # Step 2: Reset task status to pending before fetching for processing
             logger.info("Test mode: Resetting task status to pending before processing...")
-            if self.api_client.set_task_status(self.test_task_uuid, 'pending'):
+            if self.media_server_api_client.update_task_status(self.test_task_uuid, 'pending'):
                 logger.info(f"Test task {self.test_task_uuid} reset to pending for processing")
             else:
                 logger.warning(f"Failed to reset test task {self.test_task_uuid} to pending")
             
             # Step 3: Fetch task again and do normal processing
             logger.info("Test mode: Step 2 - Processing task normally...")
-            task = self.api_client.fetch_next_task(reset=False)
+            task = self.media_server_api_client.fetch_next_task(reset=False)
             task_id = task.get('uuid') if task else None
             if task and task_id:
                 logger.info(f"Found processing task: {task_id}")
@@ -505,7 +401,7 @@ class VideoProcessor:
         effective_reset = reset
         while True:
             try:
-                task = self.api_client.fetch_next_task(reset=effective_reset)
+                task = self.media_server_api_client.fetch_next_task(reset=effective_reset)
                 task_id = task.get('uuid') if task else None
                 if task and task_id:
                     logger.info(f"Found task: {task_id}")

@@ -274,13 +274,13 @@ class FrameProcessing:
         )
         
         if not high_frames or not low_frames:
-            update_status_callback("Virhe: Framejen luonti epäonnistui")
+            update_status_callback("Error: Frame creation failed")
             return [], []
         
-        update_status_callback(f"Luotu {len(high_frames)} high res ja {len(low_frames)} low res framea")
+        update_status_callback(f"Created {len(high_frames)} high res and {len(low_frames)} low res frames")
         
         # Select best frames based on sharpness (one per second)
-        update_status_callback("Valitaan terävimmät framet jokaisesta sekunnista...")
+        update_status_callback("Selecting sharpest frames from each second...")
         selected_suffixes = self._select_best_frames_by_sharpness(high_frames, self.candidates_per_second)
         
         # Filter frames to only selected ones
@@ -397,7 +397,7 @@ class FrameProcessing:
 
         if not video_id:
             logger.error("Cannot upload frames: missing target video_id")
-            update_status_callback("Virhe: video_id puuttuu, frameja ei voida tallentaa")
+            update_status_callback("Error: video_id missing, cannot save frames")
             return []
         
         frame_objects = []
@@ -457,7 +457,7 @@ class FrameProcessing:
                 logger.error(f"Failed to upload frame {i}: {e}")
         
         logger.info(f"Uploaded {len(frame_objects)} frames")
-        update_status_callback(f"Tallennettu {len(frame_objects)} framea pilveen")
+        update_status_callback(f"Saved {len(frame_objects)} frames to cloud")
         
         # In test mode, print summary of frame collections
         if hasattr(api_client, 'test_mode') and api_client.test_mode:
@@ -545,21 +545,21 @@ class FrameProcessing:
             })
             
             if (idx + 1) % 5 == 0 or idx == total - 1:
-                update_status_callback(f"Valmistellaan video frameja: {idx + 1}/{total}")
+                update_status_callback(f"Preparing video frames: {idx + 1}/{total}")
         
         if not frame_entries:
-            update_status_callback("Ei frameja tallennettavaksi API:iin")
+            update_status_callback("No frames to save to API")
             return saved_frame_ids
         
         bulk_payloads = [entry['payload'] for entry in frame_entries]
-        update_status_callback(f"Lähetetään {len(bulk_payloads)} video framea bulk-pyynnössä...")
+        update_status_callback(f"Sending {len(bulk_payloads)} video frames in bulk request...")
         bulk_response = api_client.save_video_frames_bulk(bulk_payloads)
         
         if bulk_response is None:
             logger.warning("Bulk video frame luonti epäonnistui, yritetään yksittäisin kutsuin")
             fallback_ids = self._store_video_frames_individual(frame_entries, api_client, update_status_callback, layer_id)
             saved_frame_ids.extend(fallback_ids)
-            update_status_callback(f"Tallennettu {len(saved_frame_ids)} video framea API:iin (fallback)")
+            update_status_callback(f"Saved {len(saved_frame_ids)} video frames to API (fallback)")
             return saved_frame_ids
         
         failed_entries: List[Dict] = []
@@ -581,7 +581,7 @@ class FrameProcessing:
             fallback_ids = self._store_video_frames_individual(failed_entries, api_client, update_status_callback, layer_id)
             saved_frame_ids.extend(fallback_ids)
         
-        update_status_callback(f"Tallennettu {len(saved_frame_ids)} video framea API:iin")
+        update_status_callback(f"Saved {len(saved_frame_ids)} video frames to API")
         return saved_frame_ids
     
     def _store_video_frames_individual(self, frame_entries: List[Dict], api_client, update_status_callback, layer_id: Optional[str]) -> List[str]:
@@ -644,7 +644,7 @@ class FrameProcessing:
             result = subprocess.run(stella_cmd, check=True, capture_output=True, text=True)
             stella_frames = sorted(stella_dir.glob("stella_*.jpg"))
             logger.info(f"Created {len(stella_frames)} Stella frames at {self.candidates_per_second} fps")
-            update_status_callback(f"Luotu {len(stella_frames)} Stella framea ({self.candidates_per_second}/s)")
+            update_status_callback(f"Created {len(stella_frames)} Stella frames ({self.candidates_per_second}/s)")
             return stella_frames
         except subprocess.CalledProcessError as e:
             logger.error(f"Stella frame extraction failed with exit code {e.returncode}")
@@ -652,16 +652,16 @@ class FrameProcessing:
                 logger.error(f"stdout: {e.stdout}")
             if e.stderr:
                 logger.error(f"stderr: {e.stderr}")
-            update_status_callback("Virhe: Stella framejen luonti epäonnistui")
+            update_status_callback("Error: Stella frame creation failed")
             return []
         except Exception as e:
             logger.error(f"Stella frame extraction failed: {e}", exc_info=True)
-            update_status_callback("Virhe: Stella framejen luonti epäonnistui")
+            update_status_callback("Error: Stella frame creation failed")
             return []
     
     def get_route_frames_from_low_res(self, low_frames: List[Path], update_status_callback) -> List[Path]:
         """Use 12fps low res frames for route calculation."""
         logger.info(f"Using {len(low_frames)} low res frames for route calculation...")
-        update_status_callback(f"Käytetään {len(low_frames)} low res framea reitin laskentaan...")
+        update_status_callback(f"Using {len(low_frames)} low res frames for route calculation...")
         return low_frames
 

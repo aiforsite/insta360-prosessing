@@ -9,7 +9,7 @@ import subprocess
 import requests
 from urllib.parse import urlparse, parse_qs, unquote
 from pathlib import Path
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class VideoProcessing:
     def download_videos(self, video_recording: Dict, api_client, update_status_callback) -> Tuple[Optional[Path], Optional[Path]]:
         """Download front and back videos from video-recording data."""
         logger.info("Downloading front and back videos...")
-        update_status_callback("Ladataan front ja back videot...")
+        update_status_callback("Downloading front and back videos...")
         
         # Find front and back videos from videos list
         videos = video_recording.get('videos', [])
@@ -107,7 +107,7 @@ class VideoProcessing:
         
         if not front_video or not back_video:
             logger.error("Missing front or back video in video-recording data")
-            update_status_callback("Virhe: Front tai back video puuttuu video-recording datasta")
+            update_status_callback("Error: Front or back video missing from video-recording data")
             return None, None
         
         front_url = front_video.get('url')
@@ -115,7 +115,7 @@ class VideoProcessing:
         
         if not front_url or not back_url:
             logger.error("Missing video URLs in video data")
-            update_status_callback("Virhe: Videoiden URL-osoitteet puuttuvat")
+            update_status_callback("Error: Video URL addresses missing")
             return None, None
         
         front_ext = self._infer_file_extension(front_url, ".insv")
@@ -124,33 +124,33 @@ class VideoProcessing:
         front_path = self.work_dir / f"front_video{front_ext}"
         back_path = self.work_dir / f"back_video{back_ext}"
         
-        update_status_callback("Ladataan front video...")
+        update_status_callback("Downloading front video...")
         front_ok = self.download_video(front_url, front_path)
         
-        update_status_callback("Ladataan back video...")
+        update_status_callback("Downloading back video...")
         back_ok = self.download_video(back_url, back_path)
         
         if front_ok and back_ok:
-            update_status_callback("Videot ladattu onnistuneesti")
+            update_status_callback("Videos downloaded successfully")
             return front_path, back_path
         
-        update_status_callback("Virhe: Videoiden lataus epäonnistui")
+        update_status_callback("Error: Video download failed")
         return None, None
     
     def stitch_videos(self, front_path: Path, back_path: Path, output_path: Path, update_status_callback) -> bool:
         """Execute stitching of videos to output file using MediaSDKTest."""
         logger.info("Stitching videos...")
-        update_status_callback("Suoritetaan videoiden stitchaus...")
+        update_status_callback("Stitching videos...")
         
         # Verify input files exist and have content
         if not front_path.exists():
             logger.error(f"Front video not found: {front_path}")
-            update_status_callback(f"Virhe: Front video ei löydy: {front_path}")
+            update_status_callback(f"Error: Front video not found: {front_path}")
             return False
         
         if not back_path.exists():
             logger.error(f"Back video not found: {back_path}")
-            update_status_callback(f"Virhe: Back video ei löydy: {back_path}")
+            update_status_callback(f"Error: Back video not found: {back_path}")
             return False
         
         front_size = front_path.stat().st_size
@@ -219,7 +219,7 @@ class VideoProcessing:
             # Verify output file was created and has content
             if not output_path.exists():
                 logger.error(f"Stitched output file not created: {output_path}")
-                update_status_callback("Virhe: Stitchattu video ei luotu")
+                update_status_callback("Error: Stitched video was not created")
                 return False
             
             output_size = output_path.stat().st_size
@@ -227,7 +227,7 @@ class VideoProcessing:
             
             if output_size == 0:
                 logger.error(f"Stitched output file is empty: {output_path}")
-                update_status_callback("Virhe: Stitchattu video on tyhjä")
+                update_status_callback("Error: Stitched video is empty")
                 return False
             
             # Try to get video properties using ffprobe if available
@@ -367,6 +367,60 @@ class VideoProcessing:
             return False
         except Exception as e:
             logger.error(f"Stitching failed: {e}")
-            update_status_callback(f"Virhe stitchauksessa: {str(e)}")
+            update_status_callback(f"Error in stitching: {str(e)}")
             return False
+    
+    def store_processed_video(
+        self,
+        stitched_path: Path,
+        project_id: str,
+        video_recording: Optional[Dict],
+        api_client,
+        video_type: str = 'video_insta360_processed_stitched'
+    ) -> Optional[str]:
+        """Upload stitched video binary to API and return video UUID."""
+        if not stitched_path.exists():
+            logger.warning(f"Processed video not found at {stitched_path}")
+            return None
+        try:
+            with open(stitched_path, 'rb') as f:
+                video_binary = f.read()
+            video_name = stitched_path.name
+            video_recording_id = video_recording.get('uuid') if video_recording else api_client.current_video_recording_id
+            video_id = api_client.store_video(
+                project_id=project_id,
+                video_recording_id=video_recording_id,
+                video_type=video_type,
+                video_size=len(video_binary),
+                video_binary=video_binary,
+                name=video_name
+            )
+            if video_id:
+                logger.info(f"Stored processed stitched video with ID {video_id}")
+            return video_id
+        except Exception as exc:
+            logger.error(f"Failed to store processed video: {exc}")
+            return None
+    
+    def select_fallback_video_id(
+        self,
+        video_recording: Optional[Dict],
+        fallback_categories: Optional[List[str]] = None
+    ) -> Optional[str]:
+        """Choose an existing video UUID to associate frames if processed video missing."""
+        if not video_recording:
+            return None
+        videos = video_recording.get('videos', []) or []
+        if fallback_categories is None:
+            fallback_categories = [
+                'video_insta360_raw_front',
+                'video_insta360_raw_back'
+            ]
+        for category in fallback_categories:
+            for video in videos:
+                if video.get('category') == category and video.get('uuid'):
+                    return video.get('uuid')
+        if videos:
+            return videos[0].get('uuid')
+        return None
 

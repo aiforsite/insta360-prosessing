@@ -6,25 +6,119 @@ import logging
 import math
 import time
 import requests
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-class APIClient:
-    """Handles all API communication."""
+class MediaServerAPIClient:
+    """Handles all Media Server API communication."""
+
+    def __init__(self, api_domain: str, api_key: str, worker_id: str):
+        """Initialize Media Server API client."""
+        self.api_domain = api_domain
+        self.api_key = api_key
+        self.worker_id = worker_id
+        self.headers = {
+            'Authorization': f'Token {self.api_key}',
+            'Content-Type': 'application/json'
+        }
     
-    def __init__(self, api_domain: str, api_key: str):
+    def _api_request(self, method: str, endpoint: str, max_retries: int = 3, **kwargs) -> Optional[Dict]:
+        """
+        Make API request with error handling and retry logic.
+        
+        Args:
+            method: HTTP method (GET, POST, PATCH, etc.)
+            endpoint: API endpoint path
+            max_retries: Maximum number of retry attempts (default: 3)
+            **kwargs: Additional arguments passed to requests.request()
+        
+        Returns:
+            Response JSON as dict if successful, None otherwise
+        """
+        url = f"{self.api_domain}{endpoint}"
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.request(
+                    method,
+                    url,
+                    headers=self.headers,
+                    **kwargs
+                )
+                response.raise_for_status()
+                return response.json() if response.content else {}
+                
+            except requests.exceptions.RequestException as e:
+                is_last_attempt = (attempt == max_retries - 1)
+                
+                # Log error details
+                error_msg = f"Media Server API request failed (attempt {attempt + 1}/{max_retries}): {e}"
+
+                # Log response details if available
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        response_text = e.response.text
+                        status_code = e.response.status_code
+                        if is_last_attempt:
+                            logger.error(f"Media Server API response status: {status_code}, text: {response_text[:500]}")
+                        else:
+                            logger.warning(f"Media Server API response status: {status_code}, text: {response_text[:200]}")
+                    except Exception:
+                        pass
+                raise Exception(error_msg) from e
+
+    def fetch_next_task(self, reset: bool = False) -> Optional[Dict]:
+        """Fetch next video_task from Media Server API."""
+        logger.info("Fetching next video task from Media Server API...")
+        payload = {
+            "task_type": "process_360_video", 
+            "environment": "development", # production
+            "worker_id": self.worker_id,
+            "change_status": "false" if reset else "true"
+        }
+        url = f"/fetch"
+        return self._api_request('POST', url, json=payload)
+
+    def update_task_status(self, task_id: str, status: str, result: Optional[str] = None) -> bool:
+        """Update task status in Media Server API."""
+        url = f"/tasks/{task_id}/"
+        payload = {"status": status}
+        if result is not None:
+            payload["result"] = result
+        self._api_request('PATCH', url, json=payload)
+        if result is not None:
+            logger.info(f"Task {task_id} status set succesfully to {status}")
+        else:
+            logger.info(f"Task {task_id} status set succesfully to {status}")
+        return True
+
+
+class APIClient:
+    """Handles all AIC API communication."""
+    
+    def __init__(self, api_domain: Optional[str] = None, api_key: Optional[str] = None):
         """Initialize API client."""
+        self.api_domain = api_domain or ''
+        self.api_key = api_key or ''
+        self.headers = {
+            'Authorization': f'Token {self.api_key}' if self.api_key else '',
+            'Content-Type': 'application/json'
+        }
+        self.current_task_id = None
+        self.current_video_recording_id = None
+        self.test_mode = False
+    
+    def update_credentials(self, api_domain: str, api_key: str):
+        """Update API domain and key, refreshing headers."""
         self.api_domain = api_domain
         self.api_key = api_key
         self.headers = {
             'Authorization': f'Token {self.api_key}',
             'Content-Type': 'application/json'
         }
-        self.current_task_id = None
-        self.current_video_recording_id = None
-        self.test_mode = False
+        logger.info(f"Updated API client credentials (domain: {api_domain})")
     
     def _api_request(self, method: str, endpoint: str, max_retries: int = 3, **kwargs) -> Optional[Dict]:
         """
@@ -85,25 +179,6 @@ class APIClient:
         
         # Should not reach here, but just in case
         return None
-    
-    def update_status_text(self, status_text: str) -> bool:
-        """Update task status_text in API."""
-        if not self.current_task_id:
-            logger.warning("Cannot update status: no current task ID")
-            return False
-        
-        result = self._api_request(
-            'PATCH',
-            f'/api/v1/process-recording-task/{self.current_task_id}',
-            json={'status_text': status_text}
-        )
-        return result is not None
-    
-    def fetch_next_task(self, reset: bool = False) -> Optional[Dict]:
-        """Fetch next video_task from next endpoint."""
-        logger.info("Fetching next video task...")
-        url = f"/api/v1/process-recording-task/get-next-task"
-        return self._api_request('GET', url, params={"reset": reset})
     
     def fetch_video_recording(self, video_recording_id: str) -> Optional[Dict]:
         """Fetch video-recording data from API."""
@@ -614,22 +689,6 @@ class APIClient:
             json={'status': status}
         )
         return result is not None
-
-    def set_task_status(self, task_id: str, status: str, status_text: Optional[str] = None) -> bool:
-        """Patch process-recording-task status (used for test/reset)."""
-        if not task_id:
-            logger.warning("Cannot set task status: missing task_id")
-            return False
-        payload = {'status': status}
-        if status_text:
-            payload['status_text'] = status_text
-        logger.info(f"Setting task {task_id} status to {status}")
-        result = self._api_request(
-            'PATCH',
-            f'/api/v1/process-recording-task/{task_id}',
-            json=payload
-        )
-        return result is not None
     
     def mark_videos_for_deletion(self, grace_period_days: int) -> bool:
         """Mark front and back videos for deletion after grace period using FileDeleteSchedule."""
@@ -742,4 +801,86 @@ class APIClient:
             logger.info(f"Process-recording-task status updated: {status}")
         else:
             logger.warning("Failed to update process-recording-task status")
+    
+    def _extract_image_id(self, image_field) -> Optional[str]:
+        """Helper to extract UUID from image reference."""
+        if not image_field:
+            return None
+        if isinstance(image_field, dict):
+            return image_field.get('uuid') or image_field.get('id')
+        if isinstance(image_field, str):
+            return image_field
+        return None
+    
+    def _delete_frame_and_images(self, frame: Dict) -> bool:
+        """Delete images linked to a frame, then delete the frame."""
+        frame_id = frame.get('uuid')
+        image_fields = [
+            'high_res_image',
+            'low_res_image',
+            'blur_high_image',
+            'blur_image'
+        ]
+        success = True
+        for field in image_fields:
+            image_id = self._extract_image_id(frame.get(field))
+            if image_id:
+                if not self.delete_image(image_id):
+                    success = False
+        if frame_id:
+            if not self.delete_video_frame(frame_id):
+                success = False
+        return success
+    
+    def cleanup_video_recording_data(
+        self,
+        video_recording_id: str,
+        update_status_callback,
+        preserve_categories: Optional[List[str]] = None,
+        test_mode: bool = False,
+        test_reset_status: str = 'created'
+    ) -> bool:
+        """Delete videos, frames, and images associated with a video-recording."""
+        video_recording = self.fetch_video_recording(video_recording_id)
+        if not video_recording:
+            logger.error("Reset cleanup failed: video-recording not found")
+            return False
+
+        videos = video_recording.get('videos', [])
+        targets: List[Tuple[str, bool]] = []
+        if preserve_categories is None:
+            preserve_categories = [
+                'video_insta360_raw_front',
+                'video_insta360_raw_back'
+            ]
+        
+        for video in videos:
+            video_uuid = video.get('uuid')
+            category = video.get('category')
+            # Skip front and back raw videos - don't delete them
+            if video_uuid and category not in preserve_categories:
+                targets.append((video_uuid, True))
+        # Frame entries may reference video_recording_id directly
+        targets.append((video_recording_id, False))
+
+        for video_id, delete_video_flag in targets:
+            update_status_callback(f"Reset: deleting frames for video {video_id}")
+            frames = self.fetch_video_frames(video_id)
+            for frame in frames:
+                self._delete_frame_and_images(frame)
+            if delete_video_flag:
+                update_status_callback(f"Reset: deleting video {video_id}")
+                self.delete_video(video_id)
+
+        if test_mode:
+            # In test mode, reset status instead of deleting to avoid cascade deletion of process-recording-task
+            update_status_callback("Reset: resetting video-recording status")
+            self.reset_video_recording_status(video_recording_id, status=test_reset_status)
+            logger.info(f"Reset cleanup finished for video-recording {video_recording_id} (status reset to {test_reset_status})")
+        else:
+            # In normal reset mode, delete the video-recording
+            update_status_callback("Reset: deleting video-recording")
+            self.delete_video_recording(video_recording_id)
+            logger.info(f"Reset cleanup finished for video-recording {video_recording_id}")
+        return True
 

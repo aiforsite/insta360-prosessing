@@ -281,17 +281,17 @@ class RouteCalculation:
     def calculate_route(self, frame_paths: List[Path], update_status_callback) -> Optional[Dict]:
         """Calculate route using selected frames (Stella VSLAM) and update raw path."""
         logger.info("Calculating route from frames using Stella VSLAM...")
-        update_status_callback(f"Lasketaan reitti valittujen frameiden avulla ({len(frame_paths)} framea)...")
+        update_status_callback(f"Calculating route using selected frames ({len(frame_paths)} frames)...")
         
         if not frame_paths:
             logger.warning("No frames available for route calculation")
-            update_status_callback("Virhe reitin laskennassa: frameja ei saatavilla")
+            update_status_callback("Error in route calculation: frames not available")
             return None
         
         if not all([self.stella_exec, self.stella_config_path, self.stella_vocab_path]):
             error_msg = "Stella VSLAM environment variables (STELLA_EXECUTABLE, STELLA_CONFIG_PATH, STELLA_VOCAB_PATH) must be set"
             logger.error(error_msg)
-            update_status_callback(f"Virhe reitin laskennassa: {error_msg}")
+            update_status_callback(f"Error in route calculation: {error_msg}")
             return None
         
         frames_dir = frame_paths[0].parent
@@ -532,10 +532,10 @@ class RouteCalculation:
                 logger.error(f"stdout: {e.stdout}")
             if e.stderr:
                 logger.error(f"stderr: {e.stderr}")
-            update_status_callback(f"Virhe reitin laskennassa: {e.stderr or str(e)}")
+            update_status_callback(f"Error in route calculation: {e.stderr or str(e)}")
             return None
         except Exception as e:
             logger.error(f"Route calculation failed: {e}")
-            update_status_callback(f"Virhe reitin laskennassa: {str(e)}")
+            update_status_callback(f"Error in route calculation: {str(e)}")
             return None
 

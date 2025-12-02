@@ -158,7 +158,7 @@ class StellaRunner:
             logger.info(f"Stella frames zip UUID: {stella_zip_uuid}")
             
             # Step 3: Download zip file
-            self.update_status_text("Ladataan Stella frame zip-tiedosto...")
+            self.update_status_text("Downloading Stella frame zip file...")
             zip_path = self.work_dir / "stella_frames.zip"
             if not self.download_file(stella_zip_uuid, zip_path):
                 raise Exception("Failed to download stella frames zip file")
@@ -238,7 +238,7 @@ class StellaRunner:
             
         except Exception as e:
             logger.error(f"Stella task processing failed: {e}")
-            self.update_status_text(f"Virhe: {str(e)}")
+            self.update_status_text(f"Error: {str(e)}")
             self.api_client.report_task_completion(success=False, error=str(e))
             self.clean_local_directories()
             return False

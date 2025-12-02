@@ -54,6 +54,48 @@ class RouteCalculation:
             logger.warning(f"Could not parse frame suffix from {frame_path}")
             return None
     
+    def _get_video_duration(self, video_path: Path) -> Optional[float]:
+        """Get video duration in seconds using ffprobe.
+        
+        Args:
+            video_path: Path to video file
+        
+        Returns:
+            Duration in seconds, or None if unable to determine
+        """
+        try:
+            ffprobe_cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'json',
+                str(video_path)
+            ]
+            result = subprocess.run(
+                ffprobe_cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                probe_data = json.loads(result.stdout)
+                duration = probe_data.get('format', {}).get('duration')
+                if duration:
+                    duration_float = float(duration)
+                    logger.info(f"Video duration: {duration_float:.2f} seconds ({duration_float / 60:.2f} minutes)")
+                    return duration_float
+            logger.warning(f"Could not extract duration from ffprobe output")
+            return None
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning(f"ffprobe not available or timeout: {e}")
+            return None
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.warning(f"Could not parse ffprobe output: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Unexpected error getting video duration: {e}")
+            return None
+    
     def _parse_route_lines(self, map_output_path: Path) -> List[str]:
         """Read raw route lines from map output file."""
         lines: List[str] = []
@@ -100,6 +142,42 @@ class RouteCalculation:
         logger.info(f"Built line mapping with {len(mapping)} valid entries from {len(route_lines)} total lines")
         return mapping
     
+    def _parse_stella_trajectory(self, stella_data: Dict) -> List[Tuple[float, str]]:
+        """
+        Parse frame_trajectory data to get all timestamp entries.
+        
+        Returns list of (timestamp, line) tuples sorted by timestamp.
+        """
+        frame_trajectory_str = stella_data.get("frame_trajectory", "")
+        if not frame_trajectory_str:
+            logger.warning("No frame_trajectory found in stella_data")
+            return []
+        
+        frame_trajectory = [e for e in frame_trajectory_str.split("\n") if e]
+        trajectory_entries = []
+        
+        logger.info(f"Processing {len(frame_trajectory)} frame_trajectory lines")
+        for idx, line in enumerate(frame_trajectory):
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                frame_time = float(line.split()[0])
+                trajectory_entries.append((frame_time, line))
+                
+                # Log first few lines to understand the data
+                if idx < 10:
+                    logger.debug(f"Trajectory line {idx}: frame_time={frame_time:.3f}s, line={line[:60]}...")
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Could not parse frame trajectory line {idx}: {line[:50]}... Error: {e}")
+                continue
+        
+        # Sort by timestamp
+        trajectory_entries.sort(key=lambda x: x[0])
+        logger.info(f"Parsed {len(trajectory_entries)} trajectory entries")
+        return trajectory_entries
+    
     def _filter_frames_data_from_stella_data(self, stella_data: Dict) -> Tuple[Dict[int, Tuple[float, str]], str]:
         """
         Filter frame_trajectory data to get one entry per second.
@@ -110,44 +188,24 @@ class RouteCalculation:
         Returns:
             Tuple of (filtered_data dict, formatted string)
         """
-        frame_trajectory_str = stella_data.get("frame_trajectory", "")
-        if not frame_trajectory_str:
-            logger.warning("No frame_trajectory found in stella_data")
+        trajectory_entries = self._parse_stella_trajectory(stella_data)
+        if not trajectory_entries:
             return {}, ""
         
-        frame_trajectory = [e for e in frame_trajectory_str.split("\n") if e]
         filtered_data = {}
         
         # We make sure the first line is always 0, because sometimes frame_trajectory begins from 1.
         first_line = "0.0 -0 -0 -0 0 0 0 1"
         filtered_data[0] = (0.0, first_line)
         
-        logger.info(f"Processing {len(frame_trajectory)} frame_trajectory lines")
-        for idx, line in enumerate(frame_trajectory):
-            line = line.strip()
-            if not line:
-                continue
+        for frame_time, line in trajectory_entries:
+            # We use the floor() function to ensure that we will never round up to
+            # a frame index that will not exist.
+            time_in_video = int(math.floor(frame_time))
             
-            try:
-                frame_time = float(line.split()[0])
-                # We use the floor() function to ensure that we will never round up to
-                # a frame index that will not exist.
-                time_in_video = math.floor(frame_time)
-                
-                # Log first few lines to understand the data
-                if idx < 10:
-                    logger.info(f"Trajectory line {idx}: frame_time={frame_time:.3f}s, time_in_video={time_in_video}s, line={line[:60]}...")
-                
-                # We take the first frame with a timestamp beginning with a new second.
-                if time_in_video not in filtered_data:
-                    # Append the 1st frame starting with a new second.
-                    filtered_data[time_in_video] = (frame_time, line)
-                    logger.info(f"Added trajectory entry for second {time_in_video} (frame_time={frame_time:.3f}s)")
-                else:
-                    logger.debug(f"Skipping duplicate entry for second {time_in_video} (frame_time={frame_time:.3f}s)")
-            except (ValueError, IndexError) as e:
-                logger.warning(f"Could not parse frame trajectory line {idx}: {line[:50]}... Error: {e}")
-                continue
+            # We take the first frame with a timestamp beginning with a new second.
+            if time_in_video not in filtered_data:
+                filtered_data[time_in_video] = (frame_time, line)
         
         # Build formatted string
         s = ""
@@ -155,7 +213,7 @@ class RouteCalculation:
             s += line
             s += "\n"
         
-        logger.info(f"Filtered {len(filtered_data)} entries from {len(frame_trajectory)} frame_trajectory lines")
+        logger.info(f"Filtered {len(filtered_data)} entries from {len(trajectory_entries)} trajectory entries")
         logger.debug(f"Filtered data keys: {sorted(filtered_data.keys())}")
         return filtered_data, s.strip()
     
@@ -229,38 +287,55 @@ class RouteCalculation:
             return False
         return True
     
-    def _build_raw_path(self, frame_paths: List[Path], filtered_data: Dict[int, Tuple[float, str]]) -> Dict[str, List]:
+    def _build_raw_path(self, video_path: Path, video_duration: float, trajectory_entries: List[Tuple[float, str]]) -> Dict[str, List]:
         """
         Produce raw_path dict with one coordinate per second.
         
-        Uses filtered frame_trajectory data (one entry per second) and creates
-        raw_path with rounded second values as keys and times.
+        For each second in the video (0, 1, 2, ..., duration), finds the closest
+        timestamp in Stella trajectory data and uses that coordinate.
         
         Args:
-            frame_paths: List of frame paths (used for logging only)
-            filtered_data: Dict mapping second index -> (frame_time, route_line)
+            video_path: Path to video file (for logging)
+            video_duration: Video duration in seconds
+            trajectory_entries: List of (timestamp, route_line) tuples from Stella
         
         Returns:
             Dict with structure: {"0": [0.0, "coords"], "1": [1.0, "coords"], ...}
         """
         raw_path: Dict[str, List] = {}
         
-        logger.info(f"Building raw_path from {len(filtered_data)} filtered route entries (one per second)")
+        if not trajectory_entries:
+            logger.warning("No trajectory entries available for raw_path")
+            return raw_path
         
-        # Iterate over filtered_data which already has one entry per second
-        for second_index, (frame_time, line) in sorted(filtered_data.items()):
-            # Key is the second index as string (0, 1, 2, ...)
-            # Time is the rounded second value (0.0, 1.0, 2.0, ...)
-            rounded_time = float(second_index)
+        # Calculate number of seconds (rounded up)
+        num_seconds = int(math.ceil(video_duration))
+        logger.info(f"Building raw_path for {num_seconds} seconds (video duration: {video_duration:.2f}s) using {len(trajectory_entries)} trajectory entries")
+        
+        # Create mapping from timestamp to line for quick lookup
+        timestamp_to_line = {ts: line for ts, line in trajectory_entries}
+        timestamps = sorted(timestamp_to_line.keys())
+        
+        if not timestamps:
+            logger.warning("No valid timestamps found in trajectory data")
+            return raw_path
+        
+        # For each second in the video, find the closest timestamp
+        for second in range(num_seconds):
+            target_time = float(second)
+            
+            # Find closest timestamp
+            closest_timestamp = min(timestamps, key=lambda ts: abs(ts - target_time))
+            closest_line = timestamp_to_line[closest_timestamp]
             
             # Remove null characters (\u0000) that cause PostgreSQL text field errors
-            cleaned_line = line.replace('\u0000', '').replace('\x00', '')
+            cleaned_line = closest_line.replace('\u0000', '').replace('\x00', '')
             
-            raw_path[str(second_index)] = [rounded_time, cleaned_line]
+            raw_path[str(second)] = [target_time, cleaned_line]
             
             # Debug logging for first 10 entries
-            if second_index < 10:
-                logger.debug(f"Second {second_index}: time={rounded_time:.1f}s, frame_time={frame_time:.3f}s, line={cleaned_line[:60]}...")
+            if second < 10:
+                logger.debug(f"Second {second}: time={target_time:.1f}s, closest_timestamp={closest_timestamp:.3f}s, diff={abs(closest_timestamp - target_time):.3f}s")
         
         # Log statistics
         valid_count = sum(1 for entry in raw_path.values() if entry[1] and entry[1].strip())
@@ -268,8 +343,17 @@ class RouteCalculation:
         
         return raw_path
     
-    def calculate_route(self, frame_paths: List[Path], update_status_callback) -> Optional[Dict]:
-        """Calculate route using selected frames (Stella VSLAM) and update raw path."""
+    def calculate_route(self, frame_paths: List[Path], video_path: Path, update_status_callback) -> Optional[Dict]:
+        """Calculate route using selected frames (Stella VSLAM) and update raw path.
+        
+        Args:
+            frame_paths: List of frame paths for Stella processing
+            video_path: Path to stitched video file (for duration and raw_path generation)
+            update_status_callback: Status update callback
+        
+        Returns:
+            Dict with route data including raw_path and duration, or None if failed
+        """
         logger.info("Calculating route from frames using Stella VSLAM...")
         update_status_callback(f"Calculating route using selected frames ({len(frame_paths)} frames)...")
         
@@ -277,6 +361,12 @@ class RouteCalculation:
             logger.warning("No frames available for route calculation")
             update_status_callback("Error in route calculation: frames not available")
             return None
+        
+        # Get video duration
+        video_duration = self._get_video_duration(video_path)
+        if video_duration is None:
+            logger.warning("Could not determine video duration, will use trajectory data range")
+            # Fallback: will be determined from trajectory data
         
         if not all([self.stella_exec, self.stella_config_path, self.stella_vocab_path]):
             error_msg = "Stella VSLAM environment variables (STELLA_EXECUTABLE, STELLA_CONFIG_PATH, STELLA_VOCAB_PATH) must be set"
@@ -479,28 +569,41 @@ class RouteCalculation:
                     except (IOError, UnicodeDecodeError) as e:
                         logger.warning(f"Failed to read keyframe_trajectory.txt: {e}")
             
-            # Try 4: Parse from map.msg file (fallback to old method)
-            if not stella_data.get("frame_trajectory"):
+            # Parse trajectory entries from stella_data
+            trajectory_entries = []
+            if stella_data.get("frame_trajectory"):
+                trajectory_entries = self._parse_stella_trajectory(stella_data)
+            else:
+                # Try 4: Parse from map.msg file (fallback to old method)
                 logger.warning("No frame_trajectory found in JSON, falling back to map.msg parsing")
                 route_lines = self._parse_route_lines(map_output_path)
                 line_mapping = self._build_line_mapping(route_lines)
-                # Convert to filtered_data format for compatibility
-                filtered_data = {}
                 for idx, line in line_mapping.items():
                     try:
                         frame_time = float(line.split()[0])
-                        filtered_data[int(math.floor(frame_time))] = (frame_time, line)
+                        trajectory_entries.append((frame_time, line))
                     except (ValueError, IndexError):
                         continue
                 # Ensure first entry is 0
-                if 0 not in filtered_data:
-                    filtered_data[0] = (0.0, "0.0 -0 -0 -0 0 0 0 1")
-            else:
-                # Use frame_trajectory data with filtering
-                filtered_data, _ = self._filter_frames_data_from_stella_data(stella_data)
+                if not trajectory_entries or trajectory_entries[0][0] > 0.1:
+                    trajectory_entries.insert(0, (0.0, "0.0 -0 -0 -0 0 0 0 1"))
+                trajectory_entries.sort(key=lambda x: x[0])
             
-            # Build raw_path using filtered data
-            raw_path = self._build_raw_path(frame_paths, filtered_data) if filtered_data else {}
+            # If video duration not available, use max timestamp from trajectory
+            if video_duration is None and trajectory_entries:
+                max_timestamp = max(ts for ts, _ in trajectory_entries)
+                video_duration = max_timestamp
+                logger.info(f"Using trajectory max timestamp as video duration: {video_duration:.2f}s")
+            
+            # Build raw_path using video duration and trajectory entries
+            if video_duration and trajectory_entries:
+                raw_path = self._build_raw_path(video_path, video_duration, trajectory_entries)
+            else:
+                logger.warning("Cannot build raw_path: missing video duration or trajectory data")
+                raw_path = {}
+            
+            # Get filtered_data for analysis (backward compatibility)
+            filtered_data, _ = self._filter_frames_data_from_stella_data(stella_data) if stella_data.get("frame_trajectory") else ({}, "")
             
             # Print frame trajectory analysis before saving
             self._print_frame_trajectory_analysis(stella_data, filtered_data, raw_path, len(frame_paths))
@@ -510,7 +613,8 @@ class RouteCalculation:
                 'frame_count': len(frame_paths),
                 'generated_at': datetime.now().isoformat(),
                 'command': cmd,
-                'raw_path': raw_path
+                'raw_path': raw_path,
+                'duration': video_duration
             }
             
             logger.info("Route calculated")

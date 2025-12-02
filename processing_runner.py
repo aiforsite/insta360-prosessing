@@ -337,10 +337,17 @@ class VideoProcessor:
             # Step 9: Calculate route using Stella VSLAM (via WSL if configured)
             route_data = self.route_calculation.calculate_route(
                 route_frames,
+                stitched_path,
                 self.update_status_text
             )
             if route_data:
                 raw_path = route_data.get('raw_path')
+                video_duration = route_data.get('duration')
+                
+                # Update video duration to video_recording
+                if video_duration and video_recording_id:
+                    self.api_client.update_video_recording_duration(video_recording_id, video_duration)
+                
                 if raw_path:
                     # Update raw_path to the stitched video
                     if self.processed_video_id:

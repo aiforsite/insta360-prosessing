@@ -696,6 +696,25 @@ class APIClient:
         )
         return result is not None
     
+    def update_video_recording_duration(self, video_recording_id: str, duration: float) -> bool:
+        """Update video-recording duration in seconds."""
+        if not video_recording_id:
+            logger.warning("Cannot update video-recording duration: missing video_recording_id")
+            return False
+        
+        logger.info(f"Updating video-recording {video_recording_id} duration to {duration:.2f}s...")
+        result = self._api_request(
+            'PATCH',
+            f'/api/v1/video-recording/{video_recording_id}',
+            json={'duration': duration}
+        )
+        if result is not None:
+            logger.info(f"Video-recording duration updated successfully")
+            return True
+        else:
+            logger.warning(f"Failed to update video-recording duration")
+            return False
+    
     def mark_videos_for_deletion(self, grace_period_days: int) -> bool:
         """Mark front and back videos for deletion after grace period using FileDeleteSchedule."""
         if not self.current_video_recording_id:

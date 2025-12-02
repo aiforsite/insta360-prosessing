@@ -39,22 +39,101 @@ class VideoProcessing:
         self.bitrate = self.stitch_config.get('bitrate', None)  # None = same as input
         self.enable_h265_encoder = self.stitch_config.get('enable_h265_encoder', False)
     
-    def download_video(self, url: str, output_path: Path) -> bool:
-        """Download video from URL."""
-        try:
-            logger.info(f"Downloading video from {url}...")
-            response = requests.get(url, stream=True, timeout=300)
-            response.raise_for_status()
-            
-            with open(output_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            logger.info(f"Video downloaded to {output_path}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to download video: {e}")
-            return False
+    def download_video(self, url: str, output_path: Path, max_retries: int = 3) -> bool:
+        """Download video from URL with retry logic and improved error handling.
+        
+        Args:
+            url: Video URL to download
+            output_path: Path where video will be saved
+            max_retries: Maximum number of retry attempts (default: 3)
+        
+        Returns:
+            True if download successful, False otherwise
+        """
+        import time
+        from requests.exceptions import RequestException, Timeout, ConnectionError, ChunkedEncodingError
+        
+        for attempt in range(max_retries):
+            try:
+                # Delete partial file if it exists (except on last attempt)
+                if attempt > 0 and output_path.exists():
+                    logger.info(f"Retry {attempt + 1}/{max_retries}: Removing partial file {output_path}")
+                    output_path.unlink()
+                
+                logger.info(f"Downloading video from {url} (attempt {attempt + 1}/{max_retries})...")
+                
+                # Use longer timeouts for large files
+                # connect timeout: 30s, read timeout: 600s (10 minutes per chunk)
+                response = requests.get(
+                    url,
+                    stream=True,
+                    timeout=(30, 600),
+                    headers={'Accept-Encoding': 'identity'}  # Disable compression for binary data
+                )
+                response.raise_for_status()
+                
+                # Get expected file size if available
+                total_size = response.headers.get('content-length')
+                if total_size:
+                    total_size = int(total_size)
+                    logger.info(f"Expected file size: {total_size:,} bytes ({total_size / (1024*1024):.2f} MB)")
+                
+                # Use larger chunk size for better performance (1MB chunks)
+                chunk_size = 1024 * 1024  # 1 MB
+                downloaded = 0
+                
+                with open(output_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if chunk:  # Filter out keep-alive chunks
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            # Log progress for large files
+                            if total_size and downloaded % (10 * 1024 * 1024) == 0:  # Every 10 MB
+                                progress = (downloaded / total_size) * 100
+                                logger.debug(f"Download progress: {downloaded:,} / {total_size:,} bytes ({progress:.1f}%)")
+                
+                # Verify file was downloaded completely
+                if total_size and output_path.stat().st_size != total_size:
+                    raise Exception(f"File size mismatch: expected {total_size:,} bytes, got {output_path.stat().st_size:,} bytes")
+                
+                file_size = output_path.stat().st_size
+                logger.info(f"Video downloaded successfully to {output_path} ({file_size:,} bytes, {file_size / (1024*1024):.2f} MB)")
+                return True
+                
+            except (ChunkedEncodingError, ConnectionError, Timeout) as e:
+                is_last_attempt = (attempt == max_retries - 1)
+                error_msg = f"Download failed (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}"
+                
+                if is_last_attempt:
+                    logger.error(error_msg)
+                    if output_path.exists():
+                        logger.warning(f"Partial file exists: {output_path} ({output_path.stat().st_size:,} bytes)")
+                    return False
+                else:
+                    logger.warning(error_msg)
+                    wait_time = (attempt + 1) * 2  # Exponential backoff: 2s, 4s, 6s
+                    logger.info(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    
+            except RequestException as e:
+                # For other request errors, don't retry (e.g., 404, 403)
+                logger.error(f"Download failed: {type(e).__name__}: {e}")
+                if output_path.exists():
+                    output_path.unlink()
+                return False
+                
+            except Exception as e:
+                logger.error(f"Unexpected error during download: {type(e).__name__}: {e}")
+                if output_path.exists():
+                    output_path.unlink()
+                if attempt == max_retries - 1:
+                    return False
+                wait_time = (attempt + 1) * 2
+                logger.info(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+        
+        return False
     
     def _infer_file_extension(self, url: str, default_extension: str = ".mp4") -> str:
         """Infer file extension from URL query/path (handles S3 response-content-disposition)."""

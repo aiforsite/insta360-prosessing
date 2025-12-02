@@ -155,6 +155,11 @@ class APIClient:
             except requests.exceptions.RequestException as e:
                 is_last_attempt = (attempt == max_retries - 1)
                 
+                # Get status code if available
+                status_code = None
+                if hasattr(e, 'response') and e.response is not None:
+                    status_code = e.response.status_code
+                
                 # Log error details
                 error_msg = f"API request failed (attempt {attempt + 1}/{max_retries}): {e}"
                 if is_last_attempt:
@@ -166,7 +171,6 @@ class APIClient:
                 if hasattr(e, 'response') and e.response is not None:
                     try:
                         response_text = e.response.text
-                        status_code = e.response.status_code
                         if is_last_attempt:
                             logger.error(f"API response status: {status_code}, text: {response_text[:500]}")
                         else:
@@ -178,8 +182,14 @@ class APIClient:
                 if is_last_attempt:
                     return None
                 
-                # Calculate exponential backoff delay: 1s, 2s, 4s, etc.
-                delay = 2 ** attempt
+                # Use longer backoff for server errors (5xx) like 502 Bad Gateway
+                if status_code and status_code >= 500:
+                    # Longer delay for server errors: 3s, 6s, 12s
+                    delay = 3 * (2 ** attempt)
+                else:
+                    # Standard exponential backoff: 1s, 2s, 4s
+                    delay = 2 ** attempt
+                
                 logger.info(f"Retrying in {delay} seconds...")
                 time.sleep(delay)
         
@@ -772,11 +782,29 @@ class APIClient:
                     failed_count += 1
                     continue
                 
-                # Update frame
-                if self.update_video_frame_camera_position(frame_id, rx, ry, layer_id):
-                    updated_count += 1
-                else:
+                # Update frame with retry logic for 502 errors
+                success = False
+                max_retries = 3
+                for retry_attempt in range(max_retries):
+                    if self.update_video_frame_camera_position(frame_id, rx, ry, layer_id):
+                        updated_count += 1
+                        success = True
+                        break
+                    else:
+                        # Check if it's a 502 error (handled in _api_request, but add extra delay)
+                        if retry_attempt < max_retries - 1:
+                            # Exponential backoff for 502 errors: 2s, 4s, 8s
+                            delay = 2 ** (retry_attempt + 1)
+                            logger.debug(f"Retrying frame {frame_id} update in {delay}s (attempt {retry_attempt + 2}/{max_retries})...")
+                            time.sleep(delay)
+                
+                if not success:
                     failed_count += 1
+                
+                # Add small delay between frame updates to avoid overwhelming the server
+                # Only delay if not the last frame
+                if updated_count + failed_count < len(frames):
+                    time.sleep(0.1)  # 100ms delay between updates
                     
             except (ValueError, IndexError) as e:
                 logger.warning(f"Failed to parse coordinates from raw_path for second {second_index}: {e}")

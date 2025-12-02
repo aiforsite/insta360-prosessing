@@ -89,24 +89,32 @@ class VideoProcessor:
         
         # Track current task status (valid values: "pending", "in_progress", "completed", "failed")
         self.current_task_status = "in_progress"
+        self.last_status_text = None  # Track last sent status to avoid duplicate updates
         
         # Create wrapper for status updates that automatically uses current task ID
-        def update_status_text(status_text: str, status: Optional[str] = None):
+        # Only sends update if status text has changed (to reduce API load)
+        def update_status_text(status_text: str, status: Optional[str] = None, force: bool = False):
             """Update task status text using current task ID.
+            
+            Only sends update if status text has changed from last update (to reduce API load).
             
             Args:
                 status_text: Status message text (goes to 'result' field)
                 status: Optional status value ("pending", "in_progress", "completed", "failed")
                         If not provided, uses "in_progress" as default
+                force: If True, always send update even if text hasn't changed
             """
             if self.api_client.current_task_id:
-                # Use provided status or default to "in_progress"
-                task_status = status or "in_progress"
-                self.media_server_api_client.update_task_status(
-                    self.api_client.current_task_id,
-                    task_status,
-                    result=status_text
-                )
+                # Only update if text changed or forced
+                if force or status_text != self.last_status_text:
+                    # Use provided status or default to "in_progress"
+                    task_status = status or "in_progress"
+                    self.media_server_api_client.update_task_status(
+                        self.api_client.current_task_id,
+                        task_status,
+                        result=status_text
+                    )
+                    self.last_status_text = status_text
         self.update_status_text = update_status_text
         self.file_ops = FileOperations(self.work_dir)
         self.video_processing = VideoProcessing(self.work_dir, mediasdk_executable, stitch_config)
@@ -172,7 +180,9 @@ class VideoProcessor:
             logger.error("Reset task missing video_recording ID")
             return False
 
-        self.update_status_text("Reset: starting video-recording cleanup")
+        # Reset last status text when starting new task
+        self.last_status_text = None
+        self.update_status_text("Reset: starting video-recording cleanup", force=True)
         preserve_categories = self.config.get('fallback_video_categories', [
             'video_insta360_raw_front',
             'video_insta360_raw_back'
@@ -210,7 +220,10 @@ class VideoProcessor:
         self.api_client.test_mode = False
         self.api_client.current_video_recording_id = task.get('details', {}).get('video_recording')
         logger.info(f"Processing task {self.api_client.current_task_id}")
-        self.update_status_text("Starting video processing task...", status="in_progress")
+        
+        # Reset last status text when starting new task
+        self.last_status_text = None
+        self.update_status_text("Starting video processing task...", status="in_progress", force=True)
         
         # Update video-recording status to "processing"
         if self.api_client.current_video_recording_id:
@@ -361,7 +374,7 @@ class VideoProcessor:
             
         except Exception as e:
             logger.error(f"Task processing failed: {e}")
-            self.update_status_text(f"Error: {str(e)}", status="failed")
+            self.update_status_text(f"Error: {str(e)}", status="failed", force=True)
             
             # Update video-recording status to "failure" on error
             if self.api_client.current_video_recording_id:

@@ -95,9 +95,9 @@ class MediaServerAPIClient:
             payload["result"] = result
         self._api_request('PATCH', endpoint, json=payload)
         if result is not None:
-            logger.info(f"Task {task_id} status set succesfully to {status}")
+            logger.info(f"Task {task_id} status set succesfully to {status} with result {result}")
         else:
-            logger.info(f"Task {task_id} status set succesfully to {status}")
+            logger.info(f"Task {task_id} status set succesfully to {status} without result")
         return True
 
 

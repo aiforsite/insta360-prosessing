@@ -78,7 +78,7 @@ class MediaServerAPIClient:
             "worker_id": self.worker_id,
             "change_status": "false" if reset else "true"
         }
-        url = f"/fetch"
+        url = f"api/tasks/fetch"
         return self._api_request('POST', url, json=payload)
 
     def update_task_status(self, task_id: str, status: str, result: Optional[str] = None) -> bool:

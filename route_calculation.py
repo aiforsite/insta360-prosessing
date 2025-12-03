@@ -410,75 +410,58 @@ class RouteCalculation:
         
         # Verify WSL and Docker are available when using Docker
         def verify_wsl_docker():
-            """Verify that WSL and Docker are available."""
+            """Varmista että WSL ja Docker ovat käytettävissä.
+
+            Windowsissa käytetään suoraan C:\Windows\System32\wsl.exe
+            koska Task Schedulerin PATH ei aina sisällä System32 hakemistoa.
+            WSL:ssä kutsutaan suoraan dockeria ilman wsl komentoa.
+            """
             try:
-                # Check if WSL is available - try multiple methods for Task Scheduler compatibility
-                wsl_available = False
-                
-                # Method 1: Try wsl --list --quiet (may fail in Task Scheduler)
-                try:
-                    wsl_check = subprocess.run(
-                        ['wsl', '--list', '--quiet'],
+                # Jos ajetaan WSL:n sisällä, ei käytetä wsl komentoa lainkaan
+                if os.name != "nt" or "WSL_DISTRO_NAME" in os.environ:
+                    docker_check = subprocess.run(
+                        ["docker", "ps"],
                         capture_output=True,
                         text=True,
-                        timeout=5
+                        timeout=15,
                     )
-                    # Accept any return code - wsl --list may return non-zero but WSL is still available
-                    wsl_available = True
-                    logger.debug("WSL check via --list succeeded")
-                except (FileNotFoundError, subprocess.TimeoutExpired):
-                    pass
-                
-                # Method 2: Try simple wsl command (more reliable in Task Scheduler)
-                if not wsl_available:
-                    try:
-                        wsl_check2 = subprocess.run(
-                            ['wsl', 'echo', 'test'],
-                            capture_output=True,
-                            text=True,
-                            timeout=5
-                        )
-                        if wsl_check2.returncode == 0:
-                            wsl_available = True
-                            logger.debug("WSL check via echo succeeded")
-                    except (FileNotFoundError, subprocess.TimeoutExpired):
-                        pass
-                
-                if not wsl_available:
-                    raise Exception("WSL command not found or not accessible. Make sure WSL is installed and in system PATH.")
-                
-                # Check if Docker is available in WSL
-                # Use --exec to ensure we're in WSL context
+                    if docker_check.returncode != 0:
+                        msg = docker_check.stderr or docker_check.stdout or "docker ps failed inside WSL"
+                        raise Exception(f"Docker is not available in this environment: {msg}")
+                    logger.info("Docker verified successfully inside WSL")
+                    return True
+
+                # Windows puolella käytetään suoraa polkua wsl.exe tiedostoon
+                wsl_exe = r"C:\Windows\System32\wsl.exe"
+                if not os.path.exists(wsl_exe):
+                    # Viimeinen varakeino, jos jossain ympäristössä polku on eri
+                    wsl_exe = "wsl"
+
+                # Käytä täsmälleen samaa logiikkaa kuin testissä:
+                # wsl.exe docker ps
                 docker_check = subprocess.run(
-                    ['wsl', '--exec', 'docker', '--version'],
+                    [wsl_exe, "docker", "ps"],
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    timeout=15,
                 )
+
                 if docker_check.returncode != 0:
-                    # Try alternative: wsl docker --version (without --exec)
-                    docker_check2 = subprocess.run(
-                        ['wsl', 'docker', '--version'],
-                        capture_output=True,
-                        text=True,
-                        timeout=10
-                    )
-                    if docker_check2.returncode != 0:
-                        raise Exception("Docker is not available in WSL. Make sure Docker is installed in WSL.")
-                    else:
-                        logger.debug("Docker check via 'wsl docker' succeeded")
-                else:
-                    logger.debug("Docker check via 'wsl --exec docker' succeeded")
-                
-                logger.info("WSL and Docker verified successfully")
+                    msg = docker_check.stderr or docker_check.stdout or "docker ps failed through wsl.exe"
+                    raise Exception(f"Docker is not available in WSL. Output: {msg}")
+
+                logger.info("WSL ja Docker tarkistettu onnistuneesti")
                 return True
-            except FileNotFoundError:
-                raise Exception("WSL command not found in PATH. Make sure WSL is installed and in system PATH.")
+
+            except FileNotFoundError as e:
+                raise Exception(f"WSL/Docker verification failed: wsl.exe not found ({e})")
             except subprocess.TimeoutExpired:
-                raise Exception("WSL or Docker check timed out. This may indicate WSL is not running or Docker is not accessible.")
+                raise Exception("WSL/Docker verification failed: check timed out, WSL tai Docker ei vastaa")
             except Exception as e:
+                # Tässä syntyy se sinun lokissa näkynyt virheviesti
                 raise Exception(f"WSL/Docker verification failed: {e}")
-        
+
+
         # Build command based on execution method
         if self.use_docker:
             # Verify WSL and Docker are available

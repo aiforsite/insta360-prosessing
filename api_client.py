@@ -596,12 +596,12 @@ class APIClient:
         logger.warning(f"Unexpected response format from bulk video frame endpoint: {type(response)}")
         return None
 
-    def fetch_video_frames(self, video_id: str, page_size: int = 200) -> List[Dict]:
+    def fetch_video_frames(self, video_id: str, limit: int = 200) -> List[Dict]:
         """Fetch all video-frame records for a given video."""
         frames: List[Dict] = []
-        page = 1
+        offset = 0
         while True:
-            params = {'video': video_id, 'page': page, 'page_size': page_size}
+            params = {'video': video_id, 'offset': offset, 'limit': limit}
             response = self._api_request('GET', '/api/v1/video-frame/', params=params)
             if not response:
                 break
@@ -609,7 +609,7 @@ class APIClient:
                 results = response.get('results') or []
                 frames.extend(results)
                 if response.get('next'):
-                    page += 1
+                    offset += limit
                     continue
                 break
             if isinstance(response, list):

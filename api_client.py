@@ -602,6 +602,7 @@ class APIClient:
         offset = 0
         while True:
             params = {'video': video_id, 'offset': offset, 'limit': limit}
+            logger.info(f"Fetching video frames with params: {params}")
             response = self._api_request('GET', '/api/v1/video-frame/', params=params)
             if not response:
                 break
@@ -610,6 +611,8 @@ class APIClient:
                 frames.extend(results)
                 if response.get('next'):
                     offset += limit
+                    logger.info(f"Fetching next page of video frames with offset: {offset}")
+                    time.sleep(0.5)
                     continue
                 break
             if isinstance(response, list):

@@ -29,7 +29,7 @@ class VideoProcessing:
         self.disable_cuda = self.stitch_config.get('disable_cuda', False)  # false = enable CUDA
         self.enable_debug_info = self.stitch_config.get('enable_debug_info', 'ON')
         # Optional advanced parameters
-        self.stitch_type = self.stitch_config.get('stitch_type', None)  # template, optflow, dynamicstitch, aistitch
+        self.stitch_type = self.stitch_config.get('stitch_type', 'template')  # template, optflow, dynamicstitch, aistitch
         self.ai_stitching_model = self.stitch_config.get('ai_stitching_model', '')
         self.enable_stitchfusion = self.stitch_config.get('enable_stitchfusion', 'OFF')
         self.enable_denoise = self.stitch_config.get('enable_denoise', 'OFF')

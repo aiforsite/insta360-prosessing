@@ -73,13 +73,23 @@ class FrameProcessing:
             return None
     
     def _calculate_sharpness(self, image_path: Path) -> float:
-        """Calculate Laplacian variance as sharpness metric."""
+        """Calculate Laplacian variance as sharpness metric (optimized with downscaling)."""
         try:
             import cv2
             img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
             if img is None:
                 logger.warning(f"Could not read image for sharpness calculation: {image_path}")
                 return 0.0
+            
+            # Downscale for faster calculation (maintains sharpness metric accuracy)
+            # Target size: max 640x480 for ~4x speedup while maintaining accuracy
+            height, width = img.shape
+            if height > 480 or width > 640:
+                scale = min(480 / height, 640 / width)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            
             return cv2.Laplacian(img, cv2.CV_64F).var()
         except Exception as e:
             logger.warning(f"Error calculating sharpness for {image_path}: {e}")
@@ -147,21 +157,45 @@ class FrameProcessing:
             return [], []
     
     def _select_best_frames_by_sharpness(self, high_frames: List[Path], candidates_per_second: int) -> set[int]:
-        """Select best frames based on sharpness from each group of candidates_per_second frames."""
+        """Select best frames based on sharpness from each group of candidates_per_second frames.
+        
+        Uses parallel processing to calculate sharpness for all frames simultaneously.
+        """
         if not high_frames:
             return set()
         
-        # Calculate sharpness for all high-res frames
+        # Calculate sharpness in parallel for all high-res frames
         candidates_with_sharpness = []
-        for frame_path in high_frames:
+        
+        def calculate_sharpness_for_frame(frame_path: Path) -> Optional[Tuple[int, Path, float]]:
+            """Calculate sharpness for a single frame."""
             try:
                 # Extract frame number from filename (e.g., "high_000001.jpg" -> 1)
                 suffix = int(frame_path.stem.split("_")[-1])
                 sharpness = self._calculate_sharpness(frame_path)
-                candidates_with_sharpness.append((suffix, frame_path, sharpness))
+                return (suffix, frame_path, sharpness)
             except (ValueError, IndexError) as e:
                 logger.warning(f"Could not parse frame number from {frame_path}: {e}")
-                continue
+                return None
+        
+        # Use ThreadPoolExecutor for parallel sharpness calculation
+        # Use 8 workers for good balance between speed and resource usage
+        logger.info(f"Calculating sharpness for {len(high_frames)} frames in parallel...")
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_frame = {
+                executor.submit(calculate_sharpness_for_frame, frame_path): frame_path
+                for frame_path in high_frames
+            }
+            
+            completed = 0
+            for future in as_completed(future_to_frame):
+                result = future.result()
+                if result:
+                    candidates_with_sharpness.append(result)
+                completed += 1
+                # Log progress every 100 frames
+                if completed % 100 == 0:
+                    logger.debug(f"Sharpness calculation progress: {completed}/{len(high_frames)}")
         
         if not candidates_with_sharpness:
             logger.warning("No high-res candidates found for selection")
@@ -288,20 +322,29 @@ class FrameProcessing:
         selected_high = [f for f in high_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
         selected_low = [f for f in low_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
         
-        # Remove unselected frames
-        for frame in high_frames:
-            if frame not in selected_high:
-                try:
-                    frame.unlink()
-                except FileNotFoundError:
-                    pass
+        # Create sets for faster lookup
+        selected_high_set = set(selected_high)
+        selected_low_set = set(selected_low)
         
-        for frame in low_frames:
-            if frame not in selected_low:
+        # Batch delete unselected frames in parallel
+        unselected_high = [f for f in high_frames if f not in selected_high_set]
+        unselected_low = [f for f in low_frames if f not in selected_low_set]
+        
+        if unselected_high or unselected_low:
+            def safe_delete(path: Path):
+                """Safely delete a file."""
                 try:
-                    frame.unlink()
+                    path.unlink()
                 except FileNotFoundError:
                     pass
+                except Exception as e:
+                    logger.debug(f"Failed to delete {path}: {e}")
+            
+            # Delete unselected frames in parallel
+            logger.debug(f"Deleting {len(unselected_high) + len(unselected_low)} unselected frames...")
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                for frame in unselected_high + unselected_low:
+                    executor.submit(safe_delete, frame)
         
         # Move selected frames to final directory
         selected_dir = self.work_dir / "selected_frames"
@@ -310,7 +353,13 @@ class FrameProcessing:
         final_high = []
         final_low = []
         
-        for high_frame, low_frame in zip(selected_high, selected_low):
+        # Sort selected frames by suffix to ensure correct pairing
+        selected_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        selected_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        
+        # Move frames in parallel
+        def move_frame_pair(high_frame: Path, low_frame: Path) -> Tuple[Path, Path]:
+            """Move a pair of frames to selected directory."""
             suffix = high_frame.stem.split("_")[-1]
             new_high = selected_dir / f"high_{suffix}.jpg"
             new_low = selected_dir / f"low_{suffix}.jpg"
@@ -318,8 +367,23 @@ class FrameProcessing:
             shutil.move(str(high_frame), str(new_high))
             shutil.move(str(low_frame), str(new_low))
             
-            final_high.append(new_high)
-            final_low.append(new_low)
+            return new_high, new_low
+        
+        logger.debug(f"Moving {len(selected_high)} selected frame pairs...")
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_pair = {
+                executor.submit(move_frame_pair, high, low): (high, low)
+                for high, low in zip(selected_high, selected_low)
+            }
+            
+            for future in as_completed(future_to_pair):
+                new_high, new_low = future.result()
+                final_high.append(new_high)
+                final_low.append(new_low)
+        
+        # Sort final lists by suffix
+        final_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        final_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
         
         update_status_callback(f"Selected {len(final_high)} best frames ({self.low_res_fps}/s)")
         return final_high, final_low

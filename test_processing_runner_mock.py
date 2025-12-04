@@ -149,8 +149,8 @@ class TestVideoProcessorMock(unittest.TestCase):
         
         # Setup mocks
         mock_api_instance = Mock()
-        mock_api_instance.current_task_id = None
-        mock_api_instance.current_video_recording_id = None
+        mock_api_instance.current_task_id = 'test-task-1'
+        mock_api_instance.current_video_recording_id = 'test-recording-1'
         mock_api_instance.test_mode = False
         mock_api_instance.fetch_video_recording.return_value = {
             'uuid': 'test-recording-1',
@@ -161,8 +161,9 @@ class TestVideoProcessorMock(unittest.TestCase):
         }
         mock_api_instance.set_video_recording_status.return_value = True
         mock_api_instance.update_task_route.return_value = True
+        mock_api_instance.update_video_recording_duration.return_value = True
+        mock_api_instance.update_video_frames_from_raw_path.return_value = 10
         mock_api_instance.mark_videos_for_deletion.return_value = True
-        mock_api_instance.report_task_completion.return_value = True
         processor.api_client = mock_api_instance
         
         mock_media_api_instance = Mock()
@@ -204,8 +205,12 @@ class TestVideoProcessorMock(unittest.TestCase):
         
         # Mock route calculation
         mock_route_instance = Mock()
+        stitched_path = self.test_dir / 'stitched_output.mp4'
+        stitched_path.touch()
+        stitched_path.write_bytes(b'fake video data')
         mock_route_instance.calculate_route.return_value = {
-            'raw_path': {'test': 'data'}
+            'raw_path': {'0': [0.0, '0.0 1.0 2.0 3.0 0 0 0 1']},
+            'duration': 10.0
         }
         processor.route_calculation = mock_route_instance
         
@@ -213,16 +218,12 @@ class TestVideoProcessorMock(unittest.TestCase):
         mock_file_instance = Mock()
         processor.file_ops = mock_file_instance
         
-        # Create test files
-        stitched_path = self.test_dir / 'stitched_output.mp4'
-        stitched_path.touch()
-        stitched_path.write_bytes(b'fake video data')
-        
-        # Test task
+        # Test task (using correct structure)
         task = {
-            'uuid': 'test-task-1',
-            'video_recording': 'test-recording-1',
-            'is_test': False,
+            'task_id': 'test-task-1',
+            'details': {
+                'video_recording': 'test-recording-1'
+            },
             'domain': 'http://test-api.example.com',
             'token': 'test-token'
         }
@@ -240,7 +241,8 @@ class TestVideoProcessorMock(unittest.TestCase):
         mock_frame_instance.upload_frames_to_cloud.assert_called_once()
         mock_frame_instance.create_stella_frames.assert_called_once()
         mock_route_instance.calculate_route.assert_called_once()
-        mock_api_instance.report_task_completion.assert_called_once_with(success=True)
+        # Verify video-recording status was set to ready_to_view on success
+        mock_api_instance.set_video_recording_status.assert_any_call('test-recording-1', status='ready_to_view')
     
     @patch('processing_runner.APIClient')
     @patch('processing_runner.MediaServerAPIClient')
@@ -254,10 +256,15 @@ class TestVideoProcessorMock(unittest.TestCase):
         
         # Setup mocks
         mock_api_instance = Mock()
-        mock_api_instance.current_task_id = None
-        mock_api_instance.current_video_recording_id = None
+        mock_api_instance.current_task_id = 'test-task-1'
+        mock_api_instance.current_video_recording_id = 'test-recording-1'
         mock_api_instance.test_mode = False
-        mock_api_instance.fetch_video_recording.return_value = None  # Simulate error
+        # First call succeeds (for set_video_recording_status('processing')), second fails
+        mock_api_instance.fetch_video_recording.side_effect = [
+            {'uuid': 'test-recording-1', 'project': 'test-project-1', 'videos': []},  # First call
+            None  # Second call fails
+        ]
+        mock_api_instance.set_video_recording_status.return_value = True
         processor.api_client = mock_api_instance
         
         mock_media_api_instance = Mock()
@@ -268,10 +275,12 @@ class TestVideoProcessorMock(unittest.TestCase):
         mock_file_instance = Mock()
         processor.file_ops = mock_file_instance
         
-        # Test task
+        # Test task (using correct structure)
         task = {
-            'uuid': 'test-task-1',
-            'video_recording': 'test-recording-1',
+            'task_id': 'test-task-1',
+            'details': {
+                'video_recording': 'test-recording-1'
+            },
             'domain': 'http://test-api.example.com',
             'token': 'test-token'
         }
@@ -281,10 +290,8 @@ class TestVideoProcessorMock(unittest.TestCase):
         
         # Verify error handling
         self.assertFalse(result)
-        mock_api_instance.report_task_completion.assert_called_once_with(
-            success=False,
-            error=unittest.mock.ANY
-        )
+        # Verify video-recording status was set to failure on error
+        mock_api_instance.set_video_recording_status.assert_any_call('test-recording-1', status='failure')
         mock_file_instance.clean_local_directories.assert_called()
     
     @patch('processing_runner.APIClient')
@@ -299,10 +306,10 @@ class TestVideoProcessorMock(unittest.TestCase):
         
         # Setup mocks
         mock_api_instance = Mock()
-        mock_api_instance.current_task_id = None
-        mock_api_instance.current_video_recording_id = None
+        mock_api_instance.current_task_id = 'test-reset-task-1'
+        mock_api_instance.current_video_recording_id = 'test-recording-1'
         mock_api_instance.cleanup_video_recording_data.return_value = True
-        mock_api_instance.report_task_completion.return_value = True
+        mock_api_instance.set_video_recording_status.return_value = True
         processor.api_client = mock_api_instance
         
         mock_media_api_instance = Mock()
@@ -312,7 +319,7 @@ class TestVideoProcessorMock(unittest.TestCase):
         
         # Test task
         task = {
-            'uuid': 'test-reset-task-1',
+            'task_id': 'test-reset-task-1',
             'video_recording': 'test-recording-1',
             'domain': 'http://test-api.example.com',
             'token': 'test-token'
@@ -325,7 +332,8 @@ class TestVideoProcessorMock(unittest.TestCase):
         self.assertTrue(result)
         mock_api_instance.update_credentials.assert_called_once()
         mock_api_instance.cleanup_video_recording_data.assert_called_once()
-        mock_api_instance.report_task_completion.assert_called_once_with(success=True)
+        # Verify video-recording status was set to completed on success (when test_mode=False)
+        mock_api_instance.set_video_recording_status.assert_called_once_with('test-recording-1', status='completed')
     
     @patch('processing_runner.APIClient')
     @patch('processing_runner.MediaServerAPIClient')

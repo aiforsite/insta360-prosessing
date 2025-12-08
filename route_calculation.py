@@ -524,6 +524,9 @@ class RouteCalculation:
                 
         elif self.use_wsl:
             # WSL execution
+            # Check if we're already running inside WSL
+            is_inside_wsl = os.name != "nt" or "WSL_DISTRO_NAME" in os.environ
+            
             # Convert work_dir paths (Windows) to WSL paths
             frames_dir_wsl = to_wsl_path(str(frames_dir))
             map_output_path_wsl = to_wsl_path(str(map_output_path))
@@ -533,9 +536,12 @@ class RouteCalculation:
             stella_config_path_wsl = self.stella_config_path
             stella_vocab_path_wsl = self.stella_vocab_path
             
-            # Build WSL command: wsl <stella_exec> <args>
-            cmd = [
-                'wsl',
+            # Build WSL command: wsl <stella_exec> <args> (or direct if already in WSL)
+            cmd = []
+            if not is_inside_wsl:
+                cmd.append('wsl')
+            
+            cmd.extend([
                 self.stella_exec,
                 '-c', stella_config_path_wsl,
                 '-d', frames_dir_wsl,
@@ -545,7 +551,7 @@ class RouteCalculation:
                 '--auto-term',
                 '--map-db-out', map_output_path_wsl,
                 '-v', stella_vocab_path_wsl
-            ]
+            ])
             
             if stella_results_path_wsl:
                 cmd.extend(['--eval-log-dir', stella_results_path_wsl])

@@ -41,6 +41,12 @@ class StellaRunner:
         stella_vocab_path = self.config.get('stella_vocab_path')
         stella_results_path = self.config.get('stella_results_path')
         
+        # WSL configuration - force WSL mode without Docker
+        use_wsl = True  # Always use WSL
+        use_docker = False  # Never use Docker
+        docker_image = self.config.get('stella_docker_image', 'stella_vslam-socket')
+        docker_data_mount = self.config.get('stella_docker_data_mount', '/data')
+        
         if not api_domain or not api_key:
             raise ValueError("api_domain and api_key must be set in config.json")
         if not all([stella_exec, stella_config_path, stella_vocab_path]):
@@ -60,7 +66,11 @@ class StellaRunner:
             stella_config_path,
             stella_vocab_path,
             stella_results_path or '',
-            self.candidates_per_second
+            self.candidates_per_second,
+            use_wsl=use_wsl,
+            use_docker=use_docker,
+            docker_image=docker_image,
+            docker_data_mount=docker_data_mount
         )
     
     def clean_local_directories(self):
@@ -178,8 +188,11 @@ class StellaRunner:
             self.update_status_text(f"Purettu {len(frame_paths)} framea zip-tiedostosta")
             
             # Step 5: Calculate route using Stella
+            # Note: video_path is a placeholder - duration will be determined from trajectory data if video not available
+            video_path_placeholder = self.work_dir / "video_placeholder.mp4"
             route_data = self.route_calculation.calculate_route(
                 frame_paths,
+                video_path_placeholder,
                 self.update_status_text
             )
             

@@ -797,11 +797,27 @@ class APIClient:
                 image_data = layer_data.get('image')
                 if image_data:
                     # Download image to get dimensions
-                    # image_data might be a dict with 'url' key, or directly a URL string
+                    # image_data might be a dict with 'url' key, or directly a URL string, or a UUID
+                    image_url = None
                     if isinstance(image_data, dict):
                         image_url = image_data.get('url')
                     elif isinstance(image_data, str):
-                        image_url = image_data
+                        # Check if it's a UUID (no http/https scheme) or a full URL
+                        if image_data.startswith(('http://', 'https://')):
+                            image_url = image_data
+                        else:
+                            # It's likely a UUID, fetch the image data from API to get the URL
+                            try:
+                                logger.debug(f"Fetching image data for UUID: {image_data}")
+                                image_info = self._api_request('GET', f'/api/v1/image/{image_data}/')
+                                if image_info and isinstance(image_info, dict):
+                                    image_url = image_info.get('url')
+                                    if not image_url:
+                                        logger.warning(f"Image {image_data} has no URL field")
+                                else:
+                                    logger.warning(f"Failed to fetch image data for UUID {image_data}")
+                            except Exception as e:
+                                logger.warning(f"Error fetching image URL for UUID {image_data}: {e}")
                     else:
                         image_url = None
                     

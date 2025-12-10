@@ -4,4 +4,4 @@ opencv-python>=4.8.0
 torch>=2.1.0
 torchvision>=0.16.0
 psutil>=5.9.0
-nudged>=2.0.0
+nudged==0.3.1

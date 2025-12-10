@@ -780,7 +780,14 @@ class APIClient:
             image_data = layer_data.get('image')
             if image_data:
                 # Download image to get dimensions
-                image_url = image_data.get('url')
+                # image_data might be a dict with 'url' key, or directly a URL string
+                if isinstance(image_data, dict):
+                    image_url = image_data.get('url')
+                elif isinstance(image_data, str):
+                    image_url = image_data
+                else:
+                    image_url = None
+                
                 if image_url:
                     try:
                         response = requests.get(image_url, timeout=30)

@@ -869,6 +869,9 @@ class APIClient:
                     x, y = pixel_coordinate
                     rx = float(x / img_width)
                     ry = 1.0 - float(y / img_height)  # Flip y coordinate (origin at bottom left)
+                    # Clamp to [0.0, 1.0] range to ensure valid values
+                    rx = max(0.0, min(1.0, rx))
+                    ry = max(0.0, min(1.0, ry))
                     return rx, ry
             else:
                 # Fallback: simple linear mapping without layer dimensions
@@ -890,7 +893,11 @@ class APIClient:
                 
                 def get_rx_ry(pixel_coordinate: List[float], img_width: Optional[int], img_height: Optional[int]) -> Tuple[float, float]:
                     """Return already calculated rx, ry."""
-                    return pixel_coordinate[0], pixel_coordinate[1]
+                    rx, ry = pixel_coordinate[0], pixel_coordinate[1]
+                    # Clamp to [0.0, 1.0] range to ensure valid values
+                    rx = max(0.0, min(1.0, rx))
+                    ry = max(0.0, min(1.0, ry))
+                    return rx, ry
             
             # Fetch all video frames
             if update_status_callback:

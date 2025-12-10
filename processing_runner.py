@@ -49,8 +49,9 @@ class VideoProcessor:
         stella_config_path = self.config.get('stella_config_path')
         stella_vocab_path = self.config.get('stella_vocab_path')
         stella_results_path = self.config.get('stella_results_path')
-        use_wsl = self.config.get('stella_use_wsl', False)
-        use_docker = self.config.get('stella_use_docker', False)
+        # WSL configuration - force WSL mode without Docker
+        use_wsl = True  # Always use WSL
+        use_docker = False  # Never use Docker
         docker_image = self.config.get('stella_docker_image', 'stella_vslam-socket')
         docker_data_mount = self.config.get('stella_docker_data_mount', '/data')
         
@@ -365,11 +366,16 @@ class VideoProcessor:
                     layer_id = video_recording.get('layer')
                     if layer_id and self.processed_video_id:
                         self.update_status_text("Updating video frames with camera positions from route data...")
+                        # Extract start_position and end_position from video_recording if available
+                        start_position = video_recording.get('start_position')
+                        end_position = video_recording.get('end_position')
                         updated_count = self.api_client.update_video_frames_from_raw_path(
                             self.processed_video_id,
                             raw_path,
                             layer_id,
-                            self.update_status_text
+                            self.update_status_text,
+                            start_position=start_position,
+                            end_position=end_position
                         )
                         logger.info(f"Updated {updated_count} video frames with camera positions")
                     else:

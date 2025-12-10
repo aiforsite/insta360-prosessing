@@ -236,6 +236,34 @@ class StellaRunner:
                     logger.warning("Failed to update video with raw_path")
                 else:
                     logger.info("Route data saved to video")
+                
+                # Update video frames with camera_layer_position from raw_path
+                # if start_position and end_position are defined
+                layer_id = video_recording.get('layer')
+                start_position = video_recording.get('start_position')
+                end_position = video_recording.get('end_position')
+                
+                if layer_id and processed_video_id and start_position and end_position:
+                    self.update_status_text("Päivitetään framejen camera_layer_position arvot...")
+                    updated_count = self.api_client.update_video_frames_from_raw_path(
+                        processed_video_id,
+                        raw_path,
+                        layer_id,
+                        self.update_status_text,
+                        start_position=start_position,
+                        end_position=end_position
+                    )
+                    logger.info(f"Updated {updated_count} video frames with camera positions using start_position and end_position")
+                elif layer_id and processed_video_id:
+                    # If no start_position/end_position, still update frames with normalized values
+                    self.update_status_text("Päivitetään framejen camera_layer_position arvot...")
+                    updated_count = self.api_client.update_video_frames_from_raw_path(
+                        processed_video_id,
+                        raw_path,
+                        layer_id,
+                        self.update_status_text
+                    )
+                    logger.info(f"Updated {updated_count} video frames with camera positions")
             else:
                 logger.warning("Route data returned without raw_path information")
             

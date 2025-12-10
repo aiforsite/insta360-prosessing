@@ -539,7 +539,11 @@ class RouteCalculation:
             # Build WSL command: wsl <stella_exec> <args> (or direct if already in WSL)
             cmd = []
             if not is_inside_wsl:
-                cmd.append('wsl')
+                # Use full path to wsl.exe on Windows for better compatibility
+                wsl_exe = r"C:\Windows\System32\wsl.exe"
+                if not os.path.exists(wsl_exe):
+                    wsl_exe = "wsl"  # Fallback to PATH
+                cmd.append(wsl_exe)
             
             cmd.extend([
                 self.stella_exec,

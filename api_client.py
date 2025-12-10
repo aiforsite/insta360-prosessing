@@ -719,234 +719,254 @@ class APIClient:
             logger.error("nudged library not available. Cannot update video frames with advanced mapping.")
             return 0
         
-        # Fetch layer data to get image dimensions and corner GPS coordinates
-        layer_data = None
-        if layer_id:
-            layer_data = self.fetch_layer(layer_id)
-            if not layer_data:
-                logger.warning(f"Could not fetch layer data for {layer_id}, falling back to simple normalization")
-        
-        # Extract x and z coordinates from raw_path (y is vertical in Stella)
-        def get_points_coordinates_from_stella_results_line(stella_results_line: str) -> Tuple[float, float]:
-            """Extract x and z coordinates from Stella results line."""
-            split_line = stella_results_line.split()
-            if len(split_line) < 4:
-                raise ValueError(f"Invalid raw_path line: {stella_results_line[:50]}")
-            return float(split_line[1]), float(split_line[3])  # x and z coordinates
-        
-        # Convert raw_path dict to list of (x, z) tuples
-        raw_path_list = list(raw_path.values())
-        raw_path_xz = []
-        for i, p in enumerate(raw_path_list):
-            if not p or len(p) < 2:
-                continue
-            try:
-                raw_xz = get_points_coordinates_from_stella_results_line(p[1])
-                raw_path_xz.append(raw_xz)
-            except (ValueError, IndexError) as e:
-                logger.warning(f"Failed to parse raw_path entry {i}: {e}")
-                continue
-        
-        if not raw_path_xz:
-            logger.warning("No valid coordinates found in raw_path")
-            return 0
-        
-        # Determine starting and ending positions
-        starting_position = None
-        ending_position = None
-        
-        if start_position and end_position and 'rx' in start_position and 'ry' in start_position and 'rx' in end_position and 'ry' in end_position:
-            starting_position = (float(start_position['rx']), float(start_position['ry']))
-            ending_position = (float(end_position['rx']), float(end_position['ry']))
-        else:
-            # Use default 0.5 for both if not specified
-            starting_position = (0.5, 0.5)
-            ending_position = (0.5, 0.5)
-            logger.info("start_position and end_position not specified, using default (0.5, 0.5)")
-        
-        # If start and end are the same, use default values
-        if starting_position == ending_position:
-            starting_position = (0.25, 0.5)
-            ending_position = (0.75, 0.5)
-            logger.info("start_position and end_position are the same, using default range")
-        
-        # Get layer image dimensions and corner GPS if available
-        width = None
-        height = None
-        corners = None
-        
-        if layer_data:
-            # Try to get image dimensions from layer
-            image_data = layer_data.get('image')
-            if image_data:
-                # Download image to get dimensions
-                # image_data might be a dict with 'url' key, or directly a URL string
-                if isinstance(image_data, dict):
-                    image_url = image_data.get('url')
-                elif isinstance(image_data, str):
-                    image_url = image_data
-                else:
-                    image_url = None
-                
-                if image_url:
-                    try:
-                        response = requests.get(image_url, timeout=30)
-                        response.raise_for_status()
-                        with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as f:
-                            f.write(response.content)
-                            f.flush()
-                            with PILImage.open(f.name) as im:
-                                width, height = im.size
-                        logger.info(f"Layer image dimensions: {width}x{height}")
-                    except Exception as e:
-                        logger.warning(f"Failed to get layer image dimensions: {e}")
+        try:
+            # Fetch layer data to get image dimensions and corner GPS coordinates
+            layer_data = None
+            if layer_id:
+                try:
+                    layer_data = self.fetch_layer(layer_id)
+                    if not layer_data:
+                        logger.warning(f"Could not fetch layer data for {layer_id}, falling back to simple normalization")
+                    elif not isinstance(layer_data, dict):
+                        logger.warning(f"Layer data is not a dict (type: {type(layer_data)}, value: {layer_data}), falling back to simple normalization")
+                        layer_data = None
+                except Exception as e:
+                    logger.warning(f"Error fetching layer data: {e}, falling back to simple normalization")
+                    layer_data = None
             
-            # Get corner GPS coordinates
-            corners = layer_data.get('corners')
-            if corners:
-                logger.info(f"Layer corners: {corners}")
+            # Extract x and z coordinates from raw_path (y is vertical in Stella)
+            def get_points_coordinates_from_stella_results_line(stella_results_line: str) -> Tuple[float, float]:
+                """Extract x and z coordinates from Stella results line."""
+                split_line = stella_results_line.split()
+                if len(split_line) < 4:
+                    raise ValueError(f"Invalid raw_path line: {stella_results_line[:50]}")
+                return float(split_line[1]), float(split_line[3])  # x and z coordinates
         
-        # Get first and last points from raw_path
-        x1_original = raw_path_xz[0][0]
-        z1_original = raw_path_xz[0][1]
-        xN_original = raw_path_xz[-1][0]
-        zN_original = raw_path_xz[-1][1]
-        
-        # Calculate target positions in image coordinates
-        # If we have layer dimensions, use them; otherwise use normalized coordinates
-        if width and height:
-            # Transform coordinates so origin is in bottom left corner
-            domain_points = [[x1_original, z1_original], [xN_original, zN_original]]
-            range_points = [
-                [starting_position[0] * width, height - starting_position[1] * height],
-                [ending_position[0] * width, height - ending_position[1] * height],
-            ]
+            # Convert raw_path dict to list of (x, z) tuples
+            raw_path_list = list(raw_path.values())
+            raw_path_xz = []
+            for i, p in enumerate(raw_path_list):
+                if not p or len(p) < 2:
+                    continue
+                try:
+                    raw_xz = get_points_coordinates_from_stella_results_line(p[1])
+                    raw_path_xz.append(raw_xz)
+                except (ValueError, IndexError) as e:
+                    logger.warning(f"Failed to parse raw_path entry {i}: {e}")
+                    continue
             
-            # Use nudged to estimate transformation
-            trans2 = nudged.estimate(domain_points, range_points)
+            if not raw_path_xz:
+                logger.warning("No valid coordinates found in raw_path")
+                return 0
             
-            # Transform all raw_path points to image pixel coordinates
-            cartesian_path = []
-            for point in raw_path_xz:
-                transformed = trans2.transform(point)
-                cartesian_path.append([int(transformed[0]), int(transformed[1])])
+            # Determine starting and ending positions
+            starting_position = None
+            ending_position = None
             
-            def get_rx_ry(pixel_coordinate: List[int], img_width: int, img_height: int) -> Tuple[float, float]:
-                """Convert pixel coordinates to rx, ry (0.0-1.0 range)."""
-                x, y = pixel_coordinate
-                rx = float(x / img_width)
-                ry = 1.0 - float(y / img_height)  # Flip y coordinate (origin at bottom left)
-                return rx, ry
-        else:
-            # Fallback: simple linear mapping without layer dimensions
-            logger.info("Layer dimensions not available, using simple linear mapping")
-            x_min, x_max = min(p[0] for p in raw_path_xz), max(p[0] for p in raw_path_xz)
-            z_min, z_max = min(p[1] for p in raw_path_xz), max(p[1] for p in raw_path_xz)
-            
-            def map_to_range(value: float, v_min: float, v_max: float, target_min: float, target_max: float) -> float:
-                if v_max == v_min:
-                    return (target_min + target_max) / 2.0
-                normalized = (value - v_min) / (v_max - v_min)
-                return target_min + normalized * (target_max - target_min)
-            
-            cartesian_path = []
-            for point in raw_path_xz:
-                rx = map_to_range(point[0], x_min, x_max, starting_position[0], ending_position[0])
-                ry = map_to_range(point[1], z_min, z_max, starting_position[1], ending_position[1])
-                cartesian_path.append([rx, ry])
-            
-            def get_rx_ry(pixel_coordinate: List[float], img_width: Optional[int], img_height: Optional[int]) -> Tuple[float, float]:
-                """Return already calculated rx, ry."""
-                return pixel_coordinate[0], pixel_coordinate[1]
-        
-        # Fetch all video frames
-        if update_status_callback:
-            update_status_callback("Fetching video frames for camera position update...")
-        frames = self.fetch_video_frames(video_id)
-        
-        if not frames:
-            logger.warning(f"No video frames found for video {video_id}")
-            return 0
-        
-        # Sort frames by time_in_video
-        frames.sort(key=lambda f: f.get('time_in_video', 0))
-        
-        # Check if number of frames matches raw_path entries
-        if len(frames) != len(raw_path_xz):
-            logger.warning(f"Number of frames ({len(frames)}) does not match raw_path entries ({len(raw_path_xz)})")
-            # Use time-based matching instead
-            logger.info("Using time-based matching for frames")
-        
-        logger.info(f"Updating {len(frames)} video frames with camera positions from raw_path...")
-        
-        updated_count = 0
-        failed_count = 0
-        
-        for idx, frame in enumerate(frames):
-            time_in_video = frame.get('time_in_video')
-            if time_in_video is None:
-                logger.warning(f"Video frame {frame.get('uuid')} missing time_in_video, skipping")
-                failed_count += 1
-                continue
-            
-            # Get corresponding raw_path entry
-            if len(frames) == len(raw_path_xz):
-                # Direct index matching
-                cartesian_point = cartesian_path[idx]
+            # Check if start_position and end_position are dicts and have required keys
+            if (start_position and isinstance(start_position, dict) and 
+                end_position and isinstance(end_position, dict) and
+                'rx' in start_position and 'ry' in start_position and 
+                'rx' in end_position and 'ry' in end_position):
+                try:
+                    starting_position = (float(start_position['rx']), float(start_position['ry']))
+                    ending_position = (float(end_position['rx']), float(end_position['ry']))
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Error parsing start_position/end_position: {e}, using defaults")
+                    starting_position = (0.5, 0.5)
+                    ending_position = (0.5, 0.5)
             else:
-                # Time-based matching
-                second_index = int(math.floor(time_in_video))
-                if second_index < len(cartesian_path):
-                    cartesian_point = cartesian_path[second_index]
+                # Use default 0.5 for both if not specified
+                starting_position = (0.5, 0.5)
+                ending_position = (0.5, 0.5)
+                logger.info("start_position and end_position not specified, using default (0.5, 0.5)")
+            
+            # If start and end are the same, use default values
+            if starting_position == ending_position:
+                starting_position = (0.25, 0.5)
+                ending_position = (0.75, 0.5)
+                logger.info("start_position and end_position are the same, using default range")
+            
+            # Get layer image dimensions and corner GPS if available
+            width = None
+            height = None
+            corners = None
+            
+            if layer_data and isinstance(layer_data, dict):
+                # Try to get image dimensions from layer
+                image_data = layer_data.get('image')
+                if image_data:
+                    # Download image to get dimensions
+                    # image_data might be a dict with 'url' key, or directly a URL string
+                    if isinstance(image_data, dict):
+                        image_url = image_data.get('url')
+                    elif isinstance(image_data, str):
+                        image_url = image_data
+                    else:
+                        image_url = None
+                    
+                    if image_url:
+                        try:
+                            response = requests.get(image_url, timeout=30)
+                            response.raise_for_status()
+                            with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as f:
+                                f.write(response.content)
+                                f.flush()
+                                with PILImage.open(f.name) as im:
+                                    width, height = im.size
+                            logger.info(f"Layer image dimensions: {width}x{height}")
+                        except Exception as e:
+                            logger.warning(f"Failed to get layer image dimensions: {e}")
+                
+                # Get corner GPS coordinates
+                corners = layer_data.get('corners')
+                if corners:
+                    logger.info(f"Layer corners: {corners}")
+            
+            # Get first and last points from raw_path
+            x1_original = raw_path_xz[0][0]
+            z1_original = raw_path_xz[0][1]
+            xN_original = raw_path_xz[-1][0]
+            zN_original = raw_path_xz[-1][1]
+            
+            # Calculate target positions in image coordinates
+            # If we have layer dimensions, use them; otherwise use normalized coordinates
+            if width and height:
+                # Transform coordinates so origin is in bottom left corner
+                domain_points = [[x1_original, z1_original], [xN_original, zN_original]]
+                range_points = [
+                    [starting_position[0] * width, height - starting_position[1] * height],
+                    [ending_position[0] * width, height - ending_position[1] * height],
+                ]
+                
+                # Use nudged to estimate transformation
+                trans2 = nudged.estimate(domain_points, range_points)
+                
+                # Transform all raw_path points to image pixel coordinates
+                cartesian_path = []
+                for point in raw_path_xz:
+                    transformed = trans2.transform(point)
+                    cartesian_path.append([int(transformed[0]), int(transformed[1])])
+                
+                def get_rx_ry(pixel_coordinate: List[int], img_width: int, img_height: int) -> Tuple[float, float]:
+                    """Convert pixel coordinates to rx, ry (0.0-1.0 range)."""
+                    x, y = pixel_coordinate
+                    rx = float(x / img_width)
+                    ry = 1.0 - float(y / img_height)  # Flip y coordinate (origin at bottom left)
+                    return rx, ry
+            else:
+                # Fallback: simple linear mapping without layer dimensions
+                logger.info("Layer dimensions not available, using simple linear mapping")
+                x_min, x_max = min(p[0] for p in raw_path_xz), max(p[0] for p in raw_path_xz)
+                z_min, z_max = min(p[1] for p in raw_path_xz), max(p[1] for p in raw_path_xz)
+                
+                def map_to_range(value: float, v_min: float, v_max: float, target_min: float, target_max: float) -> float:
+                    if v_max == v_min:
+                        return (target_min + target_max) / 2.0
+                    normalized = (value - v_min) / (v_max - v_min)
+                    return target_min + normalized * (target_max - target_min)
+                
+                cartesian_path = []
+                for point in raw_path_xz:
+                    rx = map_to_range(point[0], x_min, x_max, starting_position[0], ending_position[0])
+                    ry = map_to_range(point[1], z_min, z_max, starting_position[1], ending_position[1])
+                    cartesian_path.append([rx, ry])
+                
+                def get_rx_ry(pixel_coordinate: List[float], img_width: Optional[int], img_height: Optional[int]) -> Tuple[float, float]:
+                    """Return already calculated rx, ry."""
+                    return pixel_coordinate[0], pixel_coordinate[1]
+            
+            # Fetch all video frames
+            if update_status_callback:
+                update_status_callback("Fetching video frames for camera position update...")
+            frames = self.fetch_video_frames(video_id)
+            
+            if not frames:
+                logger.warning(f"No video frames found for video {video_id}")
+                return 0
+            
+            # Sort frames by time_in_video
+            frames.sort(key=lambda f: f.get('time_in_video', 0))
+            
+            # Check if number of frames matches raw_path entries
+            if len(frames) != len(raw_path_xz):
+                logger.warning(f"Number of frames ({len(frames)}) does not match raw_path entries ({len(raw_path_xz)})")
+                # Use time-based matching instead
+                logger.info("Using time-based matching for frames")
+            
+            logger.info(f"Updating {len(frames)} video frames with camera positions from raw_path...")
+            
+            updated_count = 0
+            failed_count = 0
+            
+            for idx, frame in enumerate(frames):
+                time_in_video = frame.get('time_in_video')
+                if time_in_video is None:
+                    logger.warning(f"Video frame {frame.get('uuid')} missing time_in_video, skipping")
+                    failed_count += 1
+                    continue
+                
+                # Get corresponding raw_path entry
+                if len(frames) == len(raw_path_xz):
+                    # Direct index matching
+                    cartesian_point = cartesian_path[idx]
                 else:
-                    logger.debug(f"No raw_path data for time {time_in_video} (index {second_index})")
+                    # Time-based matching
+                    second_index = int(math.floor(time_in_video))
+                    if second_index < len(cartesian_path):
+                        cartesian_point = cartesian_path[second_index]
+                    else:
+                        logger.debug(f"No raw_path data for time {time_in_video} (index {second_index})")
+                        failed_count += 1
+                        continue
+                
+                try:
+                    # Calculate rx and ry
+                    rx, ry = get_rx_ry(cartesian_point, width, height)
+                    
+                    frame_id = frame.get('uuid')
+                    if not frame_id:
+                        logger.warning(f"Video frame missing UUID, skipping")
+                        failed_count += 1
+                        continue
+                    
+                    # Update frame with retry logic for 502 errors
+                    success = False
+                    max_retries = 3
+                    for retry_attempt in range(max_retries):
+                        if self.update_video_frame_camera_position(frame_id, rx, ry, layer_id):
+                            updated_count += 1
+                            success = True
+                            break
+                        else:
+                            # Check if it's a 502 error (handled in _api_request, but add extra delay)
+                            if retry_attempt < max_retries - 1:
+                                # Exponential backoff for 502 errors: 2s, 4s, 8s
+                                delay = 2 ** (retry_attempt + 1)
+                                logger.debug(f"Retrying frame {frame_id} update in {delay}s (attempt {retry_attempt + 2}/{max_retries})...")
+                                time.sleep(delay)
+                    
+                    if not success:
+                        failed_count += 1
+                    
+                    # Add small delay between frame updates to avoid overwhelming the server
+                    # Only delay if not the last frame
+                    if updated_count + failed_count < len(frames):
+                        time.sleep(0.1)  # 100ms delay between updates
+                        
+                except (ValueError, IndexError, TypeError) as e:
+                    logger.warning(f"Failed to process frame {frame.get('uuid')}: {e}")
                     failed_count += 1
                     continue
             
-            try:
-                # Calculate rx and ry
-                rx, ry = get_rx_ry(cartesian_point, width, height)
-                
-                frame_id = frame.get('uuid')
-                if not frame_id:
-                    logger.warning(f"Video frame missing UUID, skipping")
-                    failed_count += 1
-                    continue
-                
-                # Update frame with retry logic for 502 errors
-                success = False
-                max_retries = 3
-                for retry_attempt in range(max_retries):
-                    if self.update_video_frame_camera_position(frame_id, rx, ry, layer_id):
-                        updated_count += 1
-                        success = True
-                        break
-                    else:
-                        # Check if it's a 502 error (handled in _api_request, but add extra delay)
-                        if retry_attempt < max_retries - 1:
-                            # Exponential backoff for 502 errors: 2s, 4s, 8s
-                            delay = 2 ** (retry_attempt + 1)
-                            logger.debug(f"Retrying frame {frame_id} update in {delay}s (attempt {retry_attempt + 2}/{max_retries})...")
-                            time.sleep(delay)
-                
-                if not success:
-                    failed_count += 1
-                
-                # Add small delay between frame updates to avoid overwhelming the server
-                # Only delay if not the last frame
-                if updated_count + failed_count < len(frames):
-                    time.sleep(0.1)  # 100ms delay between updates
-                    
-            except (ValueError, IndexError, TypeError) as e:
-                logger.warning(f"Failed to process frame {frame.get('uuid')}: {e}")
-                failed_count += 1
-                continue
-        
-        logger.info(f"Updated {updated_count}/{len(frames)} video frames with camera positions ({failed_count} failed)")
-        if update_status_callback:
-            update_status_callback(f"Updated {updated_count} video frames with camera positions")
-        
-        return updated_count
+            logger.info(f"Updated {updated_count}/{len(frames)} video frames with camera positions ({failed_count} failed)")
+            if update_status_callback:
+                update_status_callback(f"Updated {updated_count} video frames with camera positions")
+            
+            return updated_count
+        except Exception as e:
+            logger.error(f"Error in update_video_frames_from_raw_path: {e}", exc_info=True)
+            raise
 
     def delete_video(self, video_id: Optional[str]) -> bool:
         """Delete video asset."""

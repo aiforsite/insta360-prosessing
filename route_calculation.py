@@ -157,6 +157,8 @@ class RouteCalculation:
         trajectory_entries = []
         
         logger.info(f"Processing {len(frame_trajectory)} frame_trajectory lines")
+        logger.info(f"First 200 chars of frame_trajectory: {frame_trajectory_str[:200]}...")
+        
         for idx, line in enumerate(frame_trajectory):
             line = line.strip()
             if not line:
@@ -166,16 +168,36 @@ class RouteCalculation:
                 frame_time = float(line.split()[0])
                 trajectory_entries.append((frame_time, line))
                 
-                # Log first few lines to understand the data
-                if idx < 10:
-                    logger.debug(f"Trajectory line {idx}: frame_time={frame_time:.3f}s, line={line[:60]}...")
+                # Log first 20 lines and last 5 lines to understand the data
+                if idx < 20 or idx >= len(frame_trajectory) - 5:
+                    line_preview = line[:80].replace('\n', '\\n').replace('\r', '\\r')
+                    logger.info(f"Trajectory line {idx}: frame_time={frame_time:.3f}s, line_preview='{line_preview}...'")
             except (ValueError, IndexError) as e:
                 logger.warning(f"Could not parse frame trajectory line {idx}: {line[:50]}... Error: {e}")
                 continue
         
         # Sort by timestamp
         trajectory_entries.sort(key=lambda x: x[0])
-        logger.info(f"Parsed {len(trajectory_entries)} trajectory entries")
+        
+        # Log statistics about parsed trajectory
+        if trajectory_entries:
+            timestamps = [ts for ts, _ in trajectory_entries]
+            unique_timestamps = len(set(timestamps))
+            logger.info(f"Parsed {len(trajectory_entries)} trajectory entries")
+            logger.info(f"Unique timestamps: {unique_timestamps} (duplicates: {len(timestamps) - unique_timestamps})")
+            logger.info(f"Timestamp range: {min(timestamps):.3f}s - {max(timestamps):.3f}s")
+            
+            # Check for duplicate timestamps
+            from collections import Counter
+            timestamp_counts = Counter(timestamps)
+            duplicates = {ts: count for ts, count in timestamp_counts.items() if count > 1}
+            if duplicates:
+                logger.warning(f"Found {len(duplicates)} duplicate timestamps:")
+                for ts, count in list(duplicates.items())[:10]:  # Log first 10 duplicates
+                    logger.warning(f"  Timestamp {ts:.3f}s appears {count} times")
+        else:
+            logger.warning("No trajectory entries parsed!")
+        
         return trajectory_entries
     
     def _filter_frames_data_from_stella_data(self, stella_data: Dict) -> Tuple[Dict[int, Tuple[float, str]], str]:
@@ -320,6 +342,17 @@ class RouteCalculation:
             logger.warning("No valid timestamps found in trajectory data")
             return raw_path
         
+        # Log trajectory statistics
+        logger.info(f"Trajectory timestamp range: {timestamps[0]:.3f}s - {timestamps[-1]:.3f}s (total {len(timestamps)} entries)")
+        logger.info(f"First 5 trajectory timestamps: {[f'{ts:.3f}' for ts in timestamps[:5]]}")
+        logger.info(f"Last 5 trajectory timestamps: {[f'{ts:.3f}' for ts in timestamps[-5:]]}")
+        
+        # Log first few trajectory entries with their data
+        logger.info("First 3 trajectory entries (timestamp, first 50 chars of line):")
+        for i, (ts, line) in enumerate(trajectory_entries[:3]):
+            line_preview = line[:50].replace('\n', '\\n').replace('\r', '\\r')
+            logger.info(f"  [{i}] timestamp={ts:.3f}s, line_preview='{line_preview}...'")
+        
         # For each second in the video, find the closest timestamp
         for second in range(num_seconds):
             target_time = float(second)
@@ -327,15 +360,23 @@ class RouteCalculation:
             # Find closest timestamp
             closest_timestamp = min(timestamps, key=lambda ts: abs(ts - target_time))
             closest_line = timestamp_to_line[closest_timestamp]
+            time_diff = abs(closest_timestamp - target_time)
             
             # Remove null characters (\u0000) that cause PostgreSQL text field errors
             cleaned_line = closest_line.replace('\u0000', '').replace('\x00', '')
             
             raw_path[str(second)] = [target_time, cleaned_line]
             
-            # Debug logging for first 10 entries
-            if second < 10:
-                logger.debug(f"Second {second}: time={target_time:.1f}s, closest_timestamp={closest_timestamp:.3f}s, diff={abs(closest_timestamp - target_time):.3f}s")
+            # Log for first 10 entries and entries with large time differences
+            if second < 10 or time_diff > 1.0:
+                line_preview = cleaned_line[:80].replace('\n', '\\n').replace('\r', '\\r')
+                logger.info(f"Second {second}: target={target_time:.1f}s, closest_timestamp={closest_timestamp:.3f}s, diff={time_diff:.3f}s, line_preview='{line_preview}...'")
+            
+            # Log if same timestamp is used multiple times (potential issue)
+            if second > 0:
+                prev_closest = min(timestamps, key=lambda ts: abs(ts - float(second - 1)))
+                if closest_timestamp == prev_closest and time_diff > 0.5:
+                    logger.warning(f"Second {second}: Using same timestamp {closest_timestamp:.3f}s as previous second (diff={time_diff:.3f}s)")
         
         # Log statistics
         valid_count = sum(1 for entry in raw_path.values() if entry[1] and entry[1].strip())

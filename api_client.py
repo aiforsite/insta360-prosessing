@@ -438,42 +438,45 @@ class APIClient:
             
             logger.info(f"Got upload URL for video {video_uuid}")
             
-            # Step 2: Upload video binary to upload_url
-            logger.info(f"Uploading video binary to storage...")
-            try:
-                upload_result = requests.put(
-                    upload_url,
-                    data=video_binary,
-                    headers={'Content-Type': 'application/octet-stream'},
-                    timeout=600  # Longer timeout for videos
-                )
-                upload_result.raise_for_status()
-                
-                if upload_result.status_code != 200:
-                    logger.error(f"Upload failed with status code {upload_result.status_code}")
-                    logger.error(f"Response text: {upload_result.text}")
+            # Step 2: Upload video binary to upload_url (skip if binary is empty)
+            if video_size > 0 and len(video_binary) > 0:
+                logger.info(f"Uploading video binary to storage...")
+                try:
+                    upload_result = requests.put(
+                        upload_url,
+                        data=video_binary,
+                        headers={'Content-Type': 'application/octet-stream'},
+                        timeout=600  # Longer timeout for videos
+                    )
+                    upload_result.raise_for_status()
+                    
+                    if upload_result.status_code != 200:
+                        logger.error(f"Upload failed with status code {upload_result.status_code}")
+                        logger.error(f"Response text: {upload_result.text}")
+                        return None
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Video upload failed: {e}")
+                    if hasattr(e, 'response') and e.response is not None:
+                        try:
+                            logger.error(f"Response text: {e.response.text}")
+                        except Exception:
+                            pass
                     return None
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Video upload failed: {e}")
-                if hasattr(e, 'response') and e.response is not None:
-                    try:
-                        logger.error(f"Response text: {e.response.text}")
-                    except Exception:
-                        pass
-                return None
-            
-            logger.info(f"Video binary uploaded successfully")
-            
-            # Step 3: Register file with API
-            logger.info(f"Registering file for video {video_uuid}...")
-            register_response = self._api_request(
-                'PUT',
-                f'/api/v1/video/{video_uuid}/register_file',
-            )
-            
-            if not register_response:
-                logger.error("Failed to register file with API")
-                return None
+                
+                logger.info(f"Video binary uploaded successfully")
+                
+                # Step 3: Register file with API (only if we uploaded binary)
+                logger.info(f"Registering file for video {video_uuid}...")
+                register_response = self._api_request(
+                    'PUT',
+                    f'/api/v1/video/{video_uuid}/register_file',
+                )
+                
+                if not register_response:
+                    logger.error("Failed to register file with API")
+                    return None
+            else:
+                logger.info(f"Skipping video binary upload (size={video_size}, binary_length={len(video_binary)})")
             
             logger.info(f"Video stored successfully with ID: {video_uuid}")
             return video_uuid

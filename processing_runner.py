@@ -126,7 +126,17 @@ class VideoProcessor:
         self.update_status_text = update_status_text
         self.file_ops = FileOperations(self.work_dir)
         self.video_processing = VideoProcessing(self.work_dir, mediasdk_executable, stitch_config)
-        self.frame_processing = FrameProcessing(self.work_dir, self.candidates_per_second, self.low_res_fps, self.blur_settings)
+        # Configure frame processing with source and target FPS for direct frame extraction
+        source_fps = 29.95  # Default source FPS
+        target_fps = 10.0   # Target FPS (every 3rd frame from 29.95 fps)
+        self.frame_processing = FrameProcessing(
+            self.work_dir, 
+            self.candidates_per_second, 
+            self.low_res_fps, 
+            self.blur_settings,
+            source_fps=source_fps,
+            target_fps=target_fps
+        )
         self.route_calculation = RouteCalculation(
             self.work_dir,
             stella_exec or '',
@@ -267,25 +277,52 @@ class VideoProcessor:
             if video_recording.get('blur_people') is not None:
                 self.blur_people = bool(video_recording.get('blur_people'))
             
-            # Step 4: Stitch videos
-            stitched_path = self.work_dir / "stitched_output.mp4"
-            if not self.video_processing.stitch_videos(
+            # Step 4: Get video duration and extract frames directly (no intermediate video)
+            # Get video duration from front video (assume both have same duration)
+            video_duration = self.video_processing.get_video_duration(front_path)
+            if not video_duration:
+                # Default to 10 minutes if unable to determine
+                logger.warning("Could not determine video duration, defaulting to 10 minutes")
+                video_duration = 600.0  # 10 minutes
+            
+            # Generate frame indices (every 3rd frame from 29.95 fps = 10 fps)
+            frame_indices = self.video_processing._generate_frame_indices(
+                video_duration,
+                source_fps=29.95,
+                target_fps=10.0
+            )
+            
+            # Extract frames directly using MediaSDK
+            frames_dir = self.work_dir / "mediasdk_frames"
+            if not self.video_processing.extract_frames_direct(
                 front_path,
                 back_path,
-                stitched_path,
+                frames_dir,
+                frame_indices,
                 self.update_status_text
             ):
-                raise Exception("Failed to stitch videos")
+                raise Exception("Failed to extract frames directly from videos")
             
+            # Step 5: Process MediaSDK frames (create low-res versions)
+            selected_high, selected_low = self.frame_processing.process_mediasdk_frames(
+                frames_dir,
+                frame_indices,
+                self.update_status_text
+            )
+            if not selected_high or not selected_low:
+                raise Exception(f"Failed to process MediaSDK frames (got {len(selected_high)} high and {len(selected_low)} low frames)")
+            
+            # Step 6: Create video object in API (without uploading binary)
             stitched_video_id = None
             if project_id:
                 video_type = self.config.get('processed_video_category', 'video_insta360_processed_stitched')
                 stitched_video_id = self.video_processing.store_processed_video(
-                    stitched_path,
+                    None,  # No video file path needed
                     project_id,
                     video_recording,
                     self.api_client,
-                    video_type=video_type
+                    video_type=video_type,
+                    video_duration=video_duration
                 )
             if not stitched_video_id:
                 fallback_categories = self.config.get('fallback_video_categories', [
@@ -300,20 +337,11 @@ class VideoProcessor:
                 raise Exception("Failed to determine target video_id for frames")
             self.processed_video_id = stitched_video_id
             
-            # Step 5: Create and select frames (12fps high and low res, select sharpest)
-            if not stitched_path.exists():
-                raise Exception(f"Stitched video not found at {stitched_path}")
-            if stitched_path.stat().st_size == 0:
-                raise Exception(f"Stitched video is empty at {stitched_path}")
+            # Update video duration to video_recording
+            if video_duration and video_recording_id:
+                self.api_client.update_video_recording_duration(video_recording_id, video_duration)
             
-            selected_high, selected_low = self.frame_processing.create_and_select_frames(
-                stitched_path,
-                self.update_status_text
-            )
-            if not selected_high or not selected_low:
-                raise Exception(f"Failed to create and select frames (got {len(selected_high)} high and {len(selected_low)} low frames)")
-            
-            # Step 6: Optional blur
+            # Step 7: Optional blur
             final_high, final_low = self.frame_processing.blur_frames_optional(
                 selected_high,
                 selected_low,
@@ -321,7 +349,7 @@ class VideoProcessor:
                 self.update_status_text
             )
             
-            # Step 7: Upload frames to cloud
+            # Step 8: Upload frames to cloud
             layer_id = video_recording.get('layer')
             frame_objects = self.frame_processing.upload_frames_to_cloud(
                 final_high + final_low,
@@ -333,27 +361,32 @@ class VideoProcessor:
                 max_workers=self.frame_upload_parallelism
             )
             
-            # Step 8: Create 12fps frames for Stella route calculation
-            route_frames = self.frame_processing.create_stella_frames(
-                stitched_path,
-                self.update_status_text
-            )
-            if not route_frames:
-                raise Exception("Failed to create Stella frames for route calculation")
+            # Step 9: Create 12fps frames for Stella route calculation
+            # Use low-res frames for Stella (they're already at appropriate resolution)
+            # We need 12fps, so we'll use every frame (we have 10fps, close enough) or extract more
+            # For now, use the low-res frames we have
+            route_frames = selected_low  # Use low-res frames for Stella
+            logger.info(f"Using {len(route_frames)} frames for Stella route calculation")
             
-            # Step 9: Calculate route using Stella VSLAM (via WSL if configured)
+            # Step 10: Calculate route using Stella VSLAM (via WSL if configured)
+            # Create a placeholder video path for route calculation (not used, but required by API)
+            placeholder_video_path = self.work_dir / "video_placeholder.mp4"
             route_data = self.route_calculation.calculate_route(
                 route_frames,
-                stitched_path,
+                placeholder_video_path,
                 self.update_status_text
             )
             if route_data:
                 raw_path = route_data.get('raw_path')
-                video_duration = route_data.get('duration')
+                route_duration = route_data.get('duration')
                 
-                # Update video duration to video_recording
-                if video_duration and video_recording_id:
-                    self.api_client.update_video_recording_duration(video_recording_id, video_duration)
+                # Use route duration if available, otherwise use video duration
+                if route_duration:
+                    if abs(route_duration - video_duration) > 5.0:  # More than 5 seconds difference
+                        logger.warning(f"Route duration ({route_duration:.2f}s) differs significantly from video duration ({video_duration:.2f}s)")
+                    # Update video duration if route provides it
+                    if video_recording_id:
+                        self.api_client.update_video_recording_duration(video_recording_id, route_duration)
                 
                 if raw_path:
                     # Update raw_path to the stitched video

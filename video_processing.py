@@ -236,6 +236,50 @@ class VideoProcessing:
         
         return False
     
+    def get_video_duration(self, video_path: Path) -> Optional[float]:
+        """
+        Get video duration in seconds using ffprobe.
+        
+        Args:
+            video_path: Path to video file
+        
+        Returns:
+            Duration in seconds, or None if unable to determine
+        """
+        try:
+            ffprobe_cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'json',
+                str(video_path)
+            ]
+            result = subprocess.run(
+                ffprobe_cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                import json
+                probe_data = json.loads(result.stdout)
+                duration = probe_data.get('format', {}).get('duration')
+                if duration:
+                    duration_float = float(duration)
+                    logger.info(f"Video duration: {duration_float:.2f} seconds ({duration_float / 60:.2f} minutes)")
+                    return duration_float
+            logger.warning(f"Could not extract duration from ffprobe output")
+            return None
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning(f"ffprobe not available or timeout: {e}")
+            return None
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.warning(f"Could not parse ffprobe output: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Unexpected error getting video duration: {e}")
+            return None
+    
     def _infer_file_extension(self, url: str, default_extension: str = ".mp4") -> str:
         """Infer file extension from URL query/path (handles S3 response-content-disposition)."""
         try:
@@ -317,8 +361,164 @@ class VideoProcessing:
         update_status_callback("Error: Video download failed")
         return None, None
     
+    def _generate_frame_indices(self, video_duration_seconds: float, source_fps: float = 29.95, target_fps: float = 10.0) -> List[int]:
+        """
+        Generate frame indices for frame extraction.
+        
+        Args:
+            video_duration_seconds: Video duration in seconds
+            source_fps: Source video FPS (default: 29.95)
+            target_fps: Target FPS for frame extraction (default: 10.0)
+        
+        Returns:
+            List of frame indices (e.g., [0, 3, 6, 9, ...] for every 3rd frame)
+        """
+        # Calculate frame interval (every Nth frame)
+        frame_interval = int(round(source_fps / target_fps))
+        if frame_interval < 1:
+            frame_interval = 1
+        
+        # Calculate total number of frames in source video
+        total_frames = int(video_duration_seconds * source_fps)
+        
+        # Generate indices: every Nth frame
+        indices = []
+        current_index = 0
+        while current_index < total_frames:
+            indices.append(current_index)
+            current_index += frame_interval
+        
+        logger.info(f"Generated {len(indices)} frame indices for {video_duration_seconds:.2f}s video "
+                   f"({source_fps} fps -> {target_fps} fps, interval={frame_interval})")
+        return indices
+    
+    def extract_frames_direct(self, front_path: Path, back_path: Path, frames_dir: Path, frame_indices: List[int], update_status_callback) -> bool:
+        """
+        Extract frames directly from videos using MediaSDKTest without creating intermediate video.
+        
+        Args:
+            front_path: Path to front video file
+            back_path: Path to back video file
+            frames_dir: Directory where frames will be saved
+            frame_indices: List of frame indices to extract (e.g., [0, 3, 6, 9, ...])
+            update_status_callback: Status update callback
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        logger.info("Extracting frames directly from videos using MediaSDKTest...")
+        update_status_callback("Extracting frames directly from videos...")
+        
+        # Verify input files exist and have content
+        if not front_path.exists():
+            logger.error(f"Front video not found: {front_path}")
+            update_status_callback(f"Error: Front video not found: {front_path}")
+            return False
+        
+        if not back_path.exists():
+            logger.error(f"Back video not found: {back_path}")
+            update_status_callback(f"Error: Back video not found: {back_path}")
+            return False
+        
+        # Create frames directory
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Format frame indices as string: "0-3-6-9-12-..."
+        frame_indices_str = '-'.join(str(idx) for idx in frame_indices)
+        
+        front_size = front_path.stat().st_size
+        back_size = back_path.stat().st_size
+        logger.info(f"Input files - Front: {front_path.name} ({front_size:,} bytes), Back: {back_path.name} ({back_size:,} bytes)")
+        logger.info(f"Extracting {len(frame_indices)} frames to {frames_dir}")
+        
+        try:
+            # MediaSDKTest command to extract frames directly
+            # Based on: MediaSDKTest.exe -inputs front.insv back.insv ... -image_sequence_dir dir -image_type jpg -export_frame_index 0-3-6-9-...
+            cmd = [
+                self.mediasdk_executable,
+                '-inputs', str(front_path), str(back_path),
+                '-disable_cuda', 'false' if not self.disable_cuda else 'true',
+                '-enable_debug_info', self.enable_debug_info,
+                '-enable_soft_encode', 'false',
+                '-enable_h265_encoder', 'h265' if self.enable_h265_encoder else 'false',
+                '-output_size', self.output_size,
+                '-enable_directionlock', self.enable_directionlock,
+                '-enable_flowstate', self.enable_flowstate,
+                '-stitch_type', self.stitch_type,
+                '-image_sequence_dir', str(frames_dir),
+                '-image_type', 'jpg',
+                '-export_frame_index', frame_indices_str
+            ]
+            
+            # Add optional parameters if configured
+            if self.ai_stitching_model and self.stitch_type == 'aistitch':
+                cmd.extend(['-ai_stitching_model', self.ai_stitching_model])
+            
+            if self.image_processing_accel:
+                cmd.extend(['-image_processing_accel', self.image_processing_accel])
+            
+            if self.enable_stitchfusion != 'OFF':
+                cmd.extend(['-enable_stitchfusion', self.enable_stitchfusion])
+            
+            if self.enable_denoise != 'OFF':
+                cmd.extend(['-enable_denoise', self.enable_denoise])
+            
+            if self.enable_colorplus != 'OFF':
+                cmd.extend(['-enable_colorplus', self.enable_colorplus])
+            
+            if self.enable_deflicker != 'OFF':
+                cmd.extend(['-enable_deflicker', self.enable_deflicker])
+            
+            # Use environment variables as-is (Windows doesn't need LD_LIBRARY_PATH)
+            env = os.environ.copy()
+            
+            logger.info(f"Running MediaSDKTest for frame extraction: {' '.join(cmd)}")
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env
+            )
+            
+            if result.stdout:
+                logger.info(f"MediaSDKTest output: {result.stdout}")
+            if result.stderr:
+                logger.warning(f"MediaSDKTest stderr: {result.stderr}")
+            
+            # Verify frames were created
+            frame_files = list(frames_dir.glob("*.jpg"))
+            if not frame_files:
+                logger.error(f"No frames were created in {frames_dir}")
+                update_status_callback("Error: No frames were extracted")
+                return False
+            
+            logger.info(f"Extracted {len(frame_files)} frames successfully")
+            update_status_callback(f"Extracted {len(frame_files)} frames")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Frame extraction failed with exit code {e.returncode}")
+            if e.stdout:
+                logger.error(f"stdout: {e.stdout}")
+            if e.stderr:
+                logger.error(f"stderr: {e.stderr}")
+            
+            update_status_callback(f"Error in frame extraction: {e.stderr or str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Frame extraction failed: {e}")
+            update_status_callback(f"Error in frame extraction: {str(e)}")
+            return False
+    
     def stitch_videos(self, front_path: Path, back_path: Path, output_path: Path, update_status_callback) -> bool:
-        """Execute stitching of videos to output file using MediaSDKTest."""
+        """Execute stitching of videos to output file using MediaSDKTest.
+        
+        NOTE: This method is kept for backward compatibility but is no longer used.
+        Use extract_frames_direct() instead to extract frames without creating intermediate video.
+        """
+        logger.warning("stitch_videos() is deprecated. Use extract_frames_direct() instead.")
+        # Keep old implementation for backward compatibility if needed
         logger.info("Stitching videos...")
         update_status_callback("Stitching videos...")
         
@@ -410,129 +610,6 @@ class VideoProcessing:
                 update_status_callback("Error: Stitched video is empty")
                 return False
             
-            # Try to get video properties using ffprobe if available
-            try:
-                ffprobe_cmd = [
-                    'ffprobe',
-                    '-v', 'error',
-                    '-select_streams', 'v:0',
-                    '-show_entries', 'stream=width,height,pix_fmt,codec_name',
-                    '-of', 'json',
-                    str(output_path)
-                ]
-                ffprobe_result = subprocess.run(
-                    ffprobe_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                if ffprobe_result.returncode == 0:
-                    import json
-                    probe_data = json.loads(ffprobe_result.stdout)
-                    streams = probe_data.get('streams', [])
-                    if streams:
-                        stream = streams[0]
-                        width = stream.get('width')
-                        height = stream.get('height')
-                        codec = stream.get('codec_name')
-                        pix_fmt = stream.get('pix_fmt')
-                        logger.info(f"Stitched video properties: {width}x{height}, codec={codec}, pix_fmt={pix_fmt}")
-                        if width and height:
-                            aspect_ratio = width / height
-                            logger.info(f"Aspect ratio: {aspect_ratio:.2f} (expected 2.0 for equirectangular 360)")
-                            if abs(aspect_ratio - 2.0) > 0.1:
-                                logger.warning(f"Unexpected aspect ratio: {aspect_ratio:.2f}, expected 2.0 for equirectangular 360")
-            except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
-                logger.debug(f"Could not probe video with ffprobe: {e}")
-            
-            # Add 360 metadata to the stitched video using ffmpeg
-            # MediaSDKTest.exe may not add proper 360 metadata, so we add it here
-            # This ensures the video is recognized as 360-degree equirectangular by players
-            logger.info("Adding 360 metadata to stitched video...")
-            update_status_callback("Adding 360 metadata to video...")
-            
-            temp_output = output_path.with_suffix('.temp' + output_path.suffix)
-            try:
-                # Use ffmpeg to inject proper 360 metadata
-                # First try with copy mode (fast, but may not work for all containers)
-                ffmpeg_cmd_copy = [
-                    'ffmpeg',
-                    '-i', str(output_path),
-                    '-c', 'copy',  # Copy streams without re-encoding
-                    '-metadata', 'spherical-video=1',
-                    '-metadata', 'stereo-mode=mono',
-                    '-y',  # Overwrite output file
-                    str(temp_output)
-                ]
-                
-                ffmpeg_result = subprocess.run(
-                    ffmpeg_cmd_copy,
-                    capture_output=True,
-                    text=True,
-                    timeout=300
-                )
-                
-                if ffmpeg_result.returncode == 0:
-                    # Verify the temp file was created
-                    if temp_output.exists() and temp_output.stat().st_size > 0:
-                        output_path.unlink()
-                        temp_output.rename(output_path)
-                        logger.info("360 metadata added successfully (copy mode)")
-                        update_status_callback("360-metadata lisätty")
-                    else:
-                        logger.warning("Copy mode produced empty file, trying re-encode")
-                        if temp_output.exists():
-                            temp_output.unlink()
-                        raise Exception("Copy mode failed")
-                else:
-                    logger.warning(f"Copy mode failed: {ffmpeg_result.stderr}")
-                    if temp_output.exists():
-                        temp_output.unlink()
-                    raise Exception("Copy mode failed")
-                    
-            except Exception as e:
-                logger.info(f"Trying re-encode mode to add 360 metadata: {e}")
-                try:
-                    # Re-encode with proper 360 metadata injection
-                    # This ensures metadata is properly embedded
-                    ffmpeg_cmd_reencode = [
-                        'ffmpeg',
-                        '-i', str(output_path),
-                        '-vf', 'scale=5760:2880:flags=lanczos',  # Ensure correct resolution
-                        '-c:v', 'libx264',
-                        '-preset', 'fast',
-                        '-crf', '18',  # High quality
-                        '-pix_fmt', 'yuv420p',
-                        '-metadata', 'spherical-video=1',
-                        '-metadata', 'stereo-mode=mono',
-                        '-movflags', '+faststart',  # Web optimization
-                        '-y',
-                        str(temp_output)
-                    ]
-                    
-                    ffmpeg_result = subprocess.run(
-                        ffmpeg_cmd_reencode,
-                        capture_output=True,
-                        text=True,
-                        timeout=600
-                    )
-                    
-                    if ffmpeg_result.returncode == 0 and temp_output.exists() and temp_output.stat().st_size > 0:
-                        output_path.unlink()
-                        temp_output.rename(output_path)
-                        logger.info("360 metadata added successfully (re-encode mode)")
-                        update_status_callback("360-metadata lisätty")
-                    else:
-                        logger.warning(f"Re-encode mode failed: {ffmpeg_result.stderr if ffmpeg_result else 'No output'}")
-                        if temp_output.exists():
-                            temp_output.unlink()
-                        update_status_callback("Warning: Could not add 360 metadata, using original video")
-                except (subprocess.TimeoutExpired, FileNotFoundError) as e2:
-                    logger.warning(f"Could not add 360 metadata (ffmpeg not available or timeout): {e2}")
-                    if temp_output.exists():
-                        temp_output.unlink()
-                    update_status_callback("Warning: Could not add 360 metadata")
-            
             logger.info(f"Videos stitched successfully to {output_path}")
             update_status_callback("Stitching complete")
             return True
@@ -552,34 +629,46 @@ class VideoProcessing:
     
     def store_processed_video(
         self,
-        stitched_path: Path,
+        stitched_path: Optional[Path],
         project_id: str,
         video_recording: Optional[Dict],
         api_client,
-        video_type: str = 'video_insta360_processed_stitched'
+        video_type: str = 'video_insta360_processed_stitched',
+        video_duration: Optional[float] = None
     ) -> Optional[str]:
-        """Upload stitched video binary to API and return video UUID."""
-        if not stitched_path.exists():
-            logger.warning(f"Processed video not found at {stitched_path}")
-            return None
+        """
+        Create video object in API without uploading binary.
+        
+        Args:
+            stitched_path: Optional path to stitched video (not used, kept for compatibility)
+            project_id: Project UUID
+            video_recording: Video recording dict
+            api_client: API client instance
+            video_type: Video type/category
+            video_duration: Optional video duration in seconds
+        
+        Returns:
+            Video UUID if successful, None otherwise
+        """
         try:
-            with open(stitched_path, 'rb') as f:
-                video_binary = f.read()
-            video_name = stitched_path.name
+            video_name = stitched_path.name if stitched_path and stitched_path.exists() else 'stitched_video.mp4'
             video_recording_id = video_recording.get('uuid') if video_recording else api_client.current_video_recording_id
+            
+            # Create video object without uploading binary
+            # We'll use a minimal size (0 or 1) since we're not uploading the binary
             video_id = api_client.store_video(
                 project_id=project_id,
                 video_recording_id=video_recording_id,
                 video_type=video_type,
-                video_size=len(video_binary),
-                video_binary=video_binary,
+                video_size=0,  # No binary to upload
+                video_binary=b'',  # Empty binary
                 name=video_name
             )
             if video_id:
-                logger.info(f"Stored processed stitched video with ID {video_id}")
+                logger.info(f"Created processed video object with ID {video_id} (no binary uploaded)")
             return video_id
         except Exception as exc:
-            logger.error(f"Failed to store processed video: {exc}")
+            logger.error(f"Failed to create processed video object: {exc}")
             return None
     
     def select_fallback_video_id(

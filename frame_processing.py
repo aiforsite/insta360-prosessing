@@ -3,6 +3,7 @@ Frame processing module for extracting, selecting, and processing video frames.
 """
 
 import logging
+import re
 import shutil
 import subprocess
 from collections import defaultdict
@@ -18,11 +19,22 @@ logger = logging.getLogger(__name__)
 class FrameProcessing:
     """Handles frame extraction, selection, and processing."""
     
-    def __init__(self, work_dir: Path, candidates_per_second: int, low_res_fps: int = 1, blur_settings: Optional[Dict] = None):
-        """Initialize frame processing."""
+    def __init__(self, work_dir: Path, candidates_per_second: int, low_res_fps: int = 1, blur_settings: Optional[Dict] = None, source_fps: float = 29.95, target_fps: float = 10.0):
+        """Initialize frame processing.
+        
+        Args:
+            work_dir: Working directory for frame processing
+            candidates_per_second: Number of candidate frames per second for selection
+            low_res_fps: Target FPS for low-res frames
+            blur_settings: Optional blur configuration
+            source_fps: Source video FPS (default: 29.95)
+            target_fps: Target FPS for extracted frames (default: 10.0)
+        """
         self.work_dir = work_dir
         self.candidates_per_second = candidates_per_second
         self.low_res_fps = low_res_fps
+        self.source_fps = source_fps
+        self.target_fps = target_fps
         self.blur_settings = blur_settings or {}
         self.blur_conf_threshold = float(self.blur_settings.get('confidence_threshold', 0.7))
         self.blur_min_box_area = float(self.blur_settings.get('min_box_area', 2500))
@@ -295,8 +307,108 @@ class FrameProcessing:
             ))
         return scaled
     
+    def process_mediasdk_frames(self, frames_dir: Path, frame_indices: List[int], update_status_callback) -> Tuple[List[Path], List[Path]]:
+        """
+        Process frames extracted directly by MediaSDK.
+        
+        MediaSDK extracts high-resolution frames. This method:
+        1. Loads the high-res frames
+        2. Creates low-resolution versions (3840x1920)
+        3. Maps frames to original frame indices for correct time calculation
+        4. Returns both high and low res frame lists
+        
+        Args:
+            frames_dir: Directory containing MediaSDK-extracted frames
+            frame_indices: List of original frame indices (e.g., [0, 3, 6, 9, ...])
+            update_status_callback: Status update callback
+        
+        Returns:
+            Tuple of (high_res_frames, low_res_frames) lists
+        """
+        update_status_callback("Processing MediaSDK-extracted frames...")
+        
+        # Find all JPG frames in the directory
+        high_frames = sorted(frames_dir.glob("*.jpg"))
+        if not high_frames:
+            logger.error(f"No frames found in {frames_dir}")
+            update_status_callback("Error: No frames found")
+            return [], []
+        
+        if len(high_frames) != len(frame_indices):
+            logger.warning(f"Frame count mismatch: found {len(high_frames)} frames but expected {len(frame_indices)} indices")
+            # Use available frames, truncate indices if needed
+            frame_indices = frame_indices[:len(high_frames)]
+        
+        logger.info(f"Found {len(high_frames)} high-res frames from MediaSDK")
+        update_status_callback(f"Processing {len(high_frames)} frames...")
+        
+        # Create low-res directory
+        low_dir = self.work_dir / "low_frames"
+        low_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create low-res versions, using original frame indices for naming
+        low_frames = []
+        for idx, (high_frame, original_frame_idx) in enumerate(zip(high_frames, frame_indices)):
+            try:
+                # Use original frame index for naming (e.g., frame 0, 3, 6, 9...)
+                frame_num = original_frame_idx
+                
+                # Create low-res version
+                low_frame_path = low_dir / f"low_{frame_num:06d}.jpg"
+                
+                with Image.open(high_frame) as img:
+                    # Resize to low resolution (3840x1920)
+                    low_img = img.resize((3840, 1920), Image.Resampling.LANCZOS)
+                    low_img.save(low_frame_path, quality=90)
+                
+                low_frames.append(low_frame_path)
+                
+                if (idx + 1) % 10 == 0:
+                    update_status_callback(f"Processed {idx + 1}/{len(high_frames)} frames...")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to process frame {high_frame}: {e}")
+                continue
+        
+        # Move high frames to selected directory for consistency
+        selected_dir = self.work_dir / "selected_frames"
+        selected_dir.mkdir(parents=True, exist_ok=True)
+        
+        final_high = []
+        for idx, (high_frame, original_frame_idx) in enumerate(zip(high_frames, frame_indices)):
+            try:
+                frame_num = original_frame_idx
+                new_high = selected_dir / f"high_{frame_num:06d}.jpg"
+                shutil.move(str(high_frame), str(new_high))
+                final_high.append(new_high)
+            except Exception as e:
+                logger.warning(f"Failed to move high frame {high_frame}: {e}")
+        
+        # Move low frames to selected directory
+        final_low = []
+        for low_frame in low_frames:
+            try:
+                frame_num = int(low_frame.stem.split("_")[-1])
+                new_low = selected_dir / f"low_{frame_num:06d}.jpg"
+                shutil.move(str(low_frame), str(new_low))
+                final_low.append(new_low)
+            except Exception as e:
+                logger.warning(f"Failed to move low frame {low_frame}: {e}")
+        
+        # Sort by frame number (original frame index)
+        final_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        final_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        
+        logger.info(f"Processed {len(final_high)} high-res and {len(final_low)} low-res frames")
+        update_status_callback(f"Processed {len(final_high)} frame pairs")
+        return final_high, final_low
+    
     def create_and_select_frames(self, stitched_path: Path, update_status_callback) -> Tuple[List[Path], List[Path]]:
-        """Extract 1fps frames (high and low res) for API storage."""
+        """Extract 1fps frames (high and low res) for API storage.
+        
+        NOTE: This method is kept for backward compatibility.
+        Use process_mediasdk_frames() when frames are extracted directly by MediaSDK.
+        """
         update_status_callback(f"Creating frames ({self.low_res_fps}/s) from stitched file...")
         
         high_dir = self.work_dir / "high_frames"
@@ -607,7 +719,13 @@ class FrameProcessing:
                 logger.warning(f"  Available images: {images}")
                 continue
             
-            time_in_video = suffix / float(self.candidates_per_second)
+            # Calculate time_in_video based on source frame index and target FPS
+            # suffix is the original frame index (e.g., 0, 3, 6, 9...)
+            # time = original_frame_index / source_fps
+            # But we want to map to target FPS, so: time = original_frame_index / source_fps
+            # However, since we extract every Nth frame, we can also use: time = (suffix / source_fps)
+            # For 10 fps from 29.95 fps (every 3rd frame), frame 3 = 3/29.95 = 0.1s
+            time_in_video = suffix / float(self.source_fps)
             
             if hasattr(api_client, 'test_mode') and api_client.test_mode:
                 print(f"\n--- Preparing video-frame payload for suffix {suffix} (time: {time_in_video}s) ---")

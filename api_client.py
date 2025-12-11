@@ -789,117 +789,53 @@ class APIClient:
             if starting_position == ending_position:
                 logger.warning("start_position and end_position are the same - this may cause issues with route mapping")
             
-            # Get layer image dimensions and corner GPS if available
-            width = None
-            height = None
-            corners = None
+            # Try to use similarity transformation (nudged) to preserve route shape
+            # If that fails or nudged is not available, use raw coordinates directly
+            cartesian_path = []
+            use_similarity_transform = False
             
-            if layer_data and isinstance(layer_data, dict):
-                # Try to get image dimensions from layer
-                image_data = layer_data.get('image')
-                if image_data:
-                    # Download image to get dimensions
-                    # image_data might be a dict with 'url' key, or directly a URL string, or a UUID
-                    image_url = None
-                    if isinstance(image_data, dict):
-                        image_url = image_data.get('url')
-                    elif isinstance(image_data, str):
-                        # Check if it's a UUID (no http/https scheme) or a full URL
-                        if image_data.startswith(('http://', 'https://')):
-                            image_url = image_data
-                        else:
-                            # It's likely a UUID, fetch the image data from API to get the URL
-                            try:
-                                logger.debug(f"Fetching image data for UUID: {image_data}")
-                                image_info = self._api_request('GET', f'/api/v1/image/{image_data}/')
-                                if image_info and isinstance(image_info, dict):
-                                    image_url = image_info.get('url')
-                                    if not image_url:
-                                        logger.warning(f"Image {image_data} has no URL field")
-                                else:
-                                    logger.warning(f"Failed to fetch image data for UUID {image_data}")
-                            except Exception as e:
-                                logger.warning(f"Error fetching image URL for UUID {image_data}: {e}")
-                    else:
-                        image_url = None
+            if nudged is not None and len(raw_path_xz) >= 2:
+                try:
+                    # Get first and last points from raw_path
+                    x1_original = raw_path_xz[0][0]
+                    z1_original = raw_path_xz[0][1]
+                    xN_original = raw_path_xz[-1][0]
+                    zN_original = raw_path_xz[-1][1]
                     
-                    if image_url:
-                        try:
-                            response = requests.get(image_url, timeout=30)
-                            response.raise_for_status()
-                            with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as f:
-                                f.write(response.content)
-                                f.flush()
-                                with PILImage.open(f.name) as im:
-                                    width, height = im.size
-                            logger.info(f"Layer image dimensions: {width}x{height}")
-                        except Exception as e:
-                            logger.warning(f"Failed to get layer image dimensions: {e}")
-                
-                # Get corner GPS coordinates
-                corners = layer_data.get('corners')
-                if corners:
-                    logger.info(f"Layer corners: {corners}")
+                    # Use similarity transformation to preserve route shape
+                    # Map first point to starting_position and last point to ending_position
+                    domain_points = [[x1_original, z1_original], [xN_original, zN_original]]
+                    range_points = [[starting_position[0], starting_position[1]], [ending_position[0], ending_position[1]]]
+                    
+                    # Estimate similarity transformation (preserves angles and ratios)
+                    trans = nudged.estimate(domain_points, range_points)
+                    
+                    # Transform all raw_path points using similarity transformation
+                    for point in raw_path_xz:
+                        transformed = trans.transform(point)
+                        cartesian_path.append([float(transformed[0]), float(transformed[1])])
+                    
+                    use_similarity_transform = True
+                    logger.info("Using similarity transformation to preserve route shape")
+                    
+                except Exception as e:
+                    logger.warning(f"Similarity transformation failed: {e}, using raw coordinates")
+                    use_similarity_transform = False
             
-            # Get first and last points from raw_path
-            x1_original = raw_path_xz[0][0]
-            z1_original = raw_path_xz[0][1]
-            xN_original = raw_path_xz[-1][0]
-            zN_original = raw_path_xz[-1][1]
+            # Fallback: use raw coordinates directly without normalization
+            # This preserves the exact route shape but values may be outside 0-1 range
+            if not use_similarity_transform:
+                logger.info("Using raw_path coordinates directly (no normalization) to preserve route shape")
+                # Use raw coordinates as-is, just convert to float
+                for point in raw_path_xz:
+                    cartesian_path.append([float(point[0]), float(point[1])])
             
-            # Calculate target positions in image coordinates
-            # If we have layer dimensions, use them; otherwise use normalized coordinates
-            if width and height:
-                # Transform coordinates so origin is in bottom left corner
-                domain_points = [[x1_original, z1_original], [xN_original, zN_original]]
-                range_points = [
-                    [starting_position[0] * width, height - starting_position[1] * height],
-                    [ending_position[0] * width, height - ending_position[1] * height],
-                ]
-                
-                # Use nudged to estimate transformation
-                trans2 = nudged.estimate(domain_points, range_points)
-                
-                # Transform all raw_path points to image pixel coordinates
-                cartesian_path = []
-                for point in raw_path_xz:
-                    transformed = trans2.transform(point)
-                    cartesian_path.append([int(transformed[0]), int(transformed[1])])
-                
-                def get_rx_ry(pixel_coordinate: List[int], img_width: int, img_height: int) -> Tuple[float, float]:
-                    """Convert pixel coordinates to rx, ry (0.0-1.0 range)."""
-                    x, y = pixel_coordinate
-                    rx = float(x / img_width)
-                    ry = 1.0 - float(y / img_height)  # Flip y coordinate (origin at bottom left)
-                    # Clamp to [0.0, 1.0] range to ensure valid values
-                    rx = max(0.0, min(1.0, rx))
-                    ry = max(0.0, min(1.0, ry))
-                    return rx, ry
-            else:
-                # Fallback: simple linear mapping without layer dimensions
-                logger.info("Layer dimensions not available, using simple linear mapping")
-                x_min, x_max = min(p[0] for p in raw_path_xz), max(p[0] for p in raw_path_xz)
-                z_min, z_max = min(p[1] for p in raw_path_xz), max(p[1] for p in raw_path_xz)
-                
-                def map_to_range(value: float, v_min: float, v_max: float, target_min: float, target_max: float) -> float:
-                    if v_max == v_min:
-                        return (target_min + target_max) / 2.0
-                    normalized = (value - v_min) / (v_max - v_min)
-                    return target_min + normalized * (target_max - target_min)
-                
-                cartesian_path = []
-                for point in raw_path_xz:
-                    rx = map_to_range(point[0], x_min, x_max, starting_position[0], ending_position[0])
-                    ry = map_to_range(point[1], z_min, z_max, starting_position[1], ending_position[1])
-                    cartesian_path.append([rx, ry])
-                
-                def get_rx_ry(pixel_coordinate: List[float], img_width: Optional[int], img_height: Optional[int]) -> Tuple[float, float]:
-                    """Return already calculated rx, ry."""
-                    rx, ry = pixel_coordinate[0], pixel_coordinate[1]
-                    # Clamp to [0.0, 1.0] range to ensure valid values
-                    rx = max(0.0, min(1.0, rx))
-                    ry = max(0.0, min(1.0, ry))
-                    return rx, ry
+            def get_rx_ry(pixel_coordinate: List[float], img_width: Optional[int] = None, img_height: Optional[int] = None) -> Tuple[float, float]:
+                """Return rx, ry values (may be outside 0.0-1.0 range to preserve route shape)."""
+                rx, ry = pixel_coordinate[0], pixel_coordinate[1]
+                # Don't clamp - allow values outside 0-1 range to preserve route shape
+                # Server should accept any float values
+                return float(rx), float(ry)
             
             # Fetch all video frames
             if update_status_callback:
@@ -946,8 +882,8 @@ class APIClient:
                         continue
                 
                 try:
-                    # Calculate rx and ry
-                    rx, ry = get_rx_ry(cartesian_point, width, height)
+                    # Calculate rx and ry (already calculated in cartesian_path, just extract)
+                    rx, ry = get_rx_ry(cartesian_point)
                     
                     frame_id = frame.get('uuid')
                     if not frame_id:

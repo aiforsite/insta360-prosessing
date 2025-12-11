@@ -303,14 +303,20 @@ class VideoProcessor:
             ):
                 raise Exception("Failed to extract frames directly from videos")
             
-            # Step 5: Process MediaSDK frames (create low-res versions)
-            selected_high, selected_low = self.frame_processing.process_mediasdk_frames(
+            # Step 5: Process MediaSDK frames (create low-res versions and select best frames)
+            # Returns: (selected_high, selected_low, stella_low)
+            # - selected_*: Best frames for API (1 fps)
+            # - stella_low: All low-res frames for Stella (10 fps)
+            # Note: Stella only needs low-res frames, not high-res
+            selected_high, selected_low, stella_low = self.frame_processing.process_mediasdk_frames(
                 frames_dir,
                 frame_indices,
                 self.update_status_text
             )
             if not selected_high or not selected_low:
                 raise Exception(f"Failed to process MediaSDK frames (got {len(selected_high)} high and {len(selected_low)} low frames)")
+            if not stella_low:
+                raise Exception(f"Failed to prepare Stella frames (got {len(stella_low)} low-res frames)")
             
             # Step 6: Create video object in API (without uploading binary)
             stitched_video_id = None
@@ -341,7 +347,7 @@ class VideoProcessor:
             if video_duration and video_recording_id:
                 self.api_client.update_video_recording_duration(video_recording_id, video_duration)
             
-            # Step 7: Optional blur
+            # Step 7: Optional blur (only for selected frames that go to API)
             final_high, final_low = self.frame_processing.blur_frames_optional(
                 selected_high,
                 selected_low,
@@ -349,7 +355,7 @@ class VideoProcessor:
                 self.update_status_text
             )
             
-            # Step 8: Upload frames to cloud
+            # Step 8: Upload selected frames to cloud (1 fps)
             layer_id = video_recording.get('layer')
             frame_objects = self.frame_processing.upload_frames_to_cloud(
                 final_high + final_low,
@@ -361,12 +367,10 @@ class VideoProcessor:
                 max_workers=self.frame_upload_parallelism
             )
             
-            # Step 9: Create 12fps frames for Stella route calculation
+            # Step 9: Use all frames for Stella route calculation (10 fps)
             # Use low-res frames for Stella (they're already at appropriate resolution)
-            # We need 12fps, so we'll use every frame (we have 10fps, close enough) or extract more
-            # For now, use the low-res frames we have
-            route_frames = selected_low  # Use low-res frames for Stella
-            logger.info(f"Using {len(route_frames)} frames for Stella route calculation")
+            route_frames = stella_low  # All 10 fps frames for Stella
+            logger.info(f"Using {len(route_frames)} frames (10 fps) for Stella route calculation")
             
             # Step 10: Calculate route using Stella VSLAM (via WSL if configured)
             # Create a placeholder video path for route calculation (not used, but required by API)

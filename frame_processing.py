@@ -307,15 +307,15 @@ class FrameProcessing:
             ))
         return scaled
     
-    def process_mediasdk_frames(self, frames_dir: Path, frame_indices: List[int], update_status_callback) -> Tuple[List[Path], List[Path]]:
+    def process_mediasdk_frames(self, frames_dir: Path, frame_indices: List[int], update_status_callback) -> Tuple[List[Path], List[Path], List[Path]]:
         """
         Process frames extracted directly by MediaSDK.
         
-        MediaSDK extracts high-resolution frames. This method:
-        1. Loads the high-res frames
-        2. Creates low-resolution versions (3840x1920)
-        3. Maps frames to original frame indices for correct time calculation
-        4. Returns both high and low res frame lists
+        MediaSDK extracts 10 frames per second. This method:
+        1. Loads all high-res frames
+        2. Creates low-resolution versions (3840x1920) for all frames
+        3. Selects the sharpest frame from each second (10 frames -> 1 frame)
+        4. Returns selected frames for API storage (1 fps) and all low-res frames for Stella (10 fps)
         
         Args:
             frames_dir: Directory containing MediaSDK-extracted frames
@@ -323,7 +323,9 @@ class FrameProcessing:
             update_status_callback: Status update callback
         
         Returns:
-            Tuple of (high_res_frames, low_res_frames) lists
+            Tuple of (selected_high_res, selected_low_res, all_low_res_stella)
+            - selected_*: Best frames for API storage (1 fps)
+            - all_low_res_stella: All low-res frames for Stella route calculation (10 fps)
         """
         update_status_callback("Processing MediaSDK-extracted frames...")
         
@@ -332,76 +334,145 @@ class FrameProcessing:
         if not high_frames:
             logger.error(f"No frames found in {frames_dir}")
             update_status_callback("Error: No frames found")
-            return [], []
+            return [], [], [], []
         
         if len(high_frames) != len(frame_indices):
             logger.warning(f"Frame count mismatch: found {len(high_frames)} frames but expected {len(frame_indices)} indices")
             # Use available frames, truncate indices if needed
             frame_indices = frame_indices[:len(high_frames)]
         
-        logger.info(f"Found {len(high_frames)} high-res frames from MediaSDK")
+        logger.info(f"Found {len(high_frames)} high-res frames from MediaSDK (10 fps)")
         update_status_callback(f"Processing {len(high_frames)} frames...")
         
-        # Create low-res directory
+        # Create temporary directory for processing
+        temp_dir = self.work_dir / "temp_frames"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Move frames to temp directory with proper naming
+        temp_high_frames = []
+        for idx, (high_frame, original_frame_idx) in enumerate(zip(high_frames, frame_indices)):
+            try:
+                frame_num = original_frame_idx
+                temp_high = temp_dir / f"high_{frame_num:06d}.jpg"
+                shutil.move(str(high_frame), str(temp_high))
+                temp_high_frames.append(temp_high)
+            except Exception as e:
+                logger.warning(f"Failed to move high frame {high_frame}: {e}")
+                continue
+        
+        # Create low-res versions for all frames
         low_dir = self.work_dir / "low_frames"
         low_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create low-res versions, using original frame indices for naming
-        low_frames = []
-        for idx, (high_frame, original_frame_idx) in enumerate(zip(high_frames, frame_indices)):
+        all_low_frames = []
+        for temp_high in temp_high_frames:
             try:
-                # Use original frame index for naming (e.g., frame 0, 3, 6, 9...)
-                frame_num = original_frame_idx
-                
-                # Create low-res version
+                frame_num = int(temp_high.stem.split("_")[-1])
                 low_frame_path = low_dir / f"low_{frame_num:06d}.jpg"
                 
-                with Image.open(high_frame) as img:
+                with Image.open(temp_high) as img:
                     # Resize to low resolution (3840x1920)
                     low_img = img.resize((3840, 1920), Image.Resampling.LANCZOS)
                     low_img.save(low_frame_path, quality=90)
                 
-                low_frames.append(low_frame_path)
+                all_low_frames.append(low_frame_path)
                 
-                if (idx + 1) % 10 == 0:
-                    update_status_callback(f"Processed {idx + 1}/{len(high_frames)} frames...")
-                    
             except Exception as e:
-                logger.warning(f"Failed to process frame {high_frame}: {e}")
+                logger.warning(f"Failed to create low-res frame for {temp_high}: {e}")
                 continue
         
-        # Move high frames to selected directory for consistency
-        selected_dir = self.work_dir / "selected_frames"
-        selected_dir.mkdir(parents=True, exist_ok=True)
+        # Sort by frame number
+        temp_high_frames.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        all_low_frames.sort(key=lambda f: int(f.stem.split("_")[-1]))
         
-        final_high = []
-        for idx, (high_frame, original_frame_idx) in enumerate(zip(high_frames, frame_indices)):
+        logger.info(f"Created {len(all_low_frames)} low-res frames")
+        update_status_callback(f"Created low-res versions for {len(all_low_frames)} frames...")
+        
+        # Select best frame from each second (10 frames -> 1 frame)
+        # We have 10 frames per second, so candidates_per_second should be 10
+        frames_per_second = int(self.target_fps)  # 10 frames per second
+        update_status_callback("Selecting sharpest frame from each second...")
+        selected_suffixes = self._select_best_frames_by_sharpness(temp_high_frames, frames_per_second)
+        
+        # Filter to only selected frames
+        selected_high = [f for f in temp_high_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
+        selected_low = [f for f in all_low_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
+        
+        # Move all low-res frames to Stella directory (for route calculation)
+        # Stella only needs low-res frames (3840x1920), not high-res
+        stella_dir = self.work_dir / "stella_frames"
+        stella_dir.mkdir(parents=True, exist_ok=True)
+        
+        stella_low = []
+        
+        # Move all low frames to Stella directory
+        for low_frame in all_low_frames:
             try:
-                frame_num = original_frame_idx
-                new_high = selected_dir / f"high_{frame_num:06d}.jpg"
-                shutil.move(str(high_frame), str(new_high))
-                final_high.append(new_high)
+                frame_num = int(low_frame.stem.split("_")[-1])
+                stella_low_path = stella_dir / f"stella_{frame_num:06d}.jpg"
+                shutil.move(str(low_frame), str(stella_low_path))
+                stella_low.append(stella_low_path)
+            except Exception as e:
+                logger.warning(f"Failed to move Stella low frame {low_frame}: {e}")
+        
+        # Move high frames to selected directory (they'll be used for API if selected)
+        # High frames not selected will be deleted later
+        high_dir = self.work_dir / "high_frames"
+        high_dir.mkdir(parents=True, exist_ok=True)
+        
+        for high_frame in temp_high_frames:
+            try:
+                frame_num = int(high_frame.stem.split("_")[-1])
+                high_path = high_dir / f"high_{frame_num:06d}.jpg"
+                shutil.move(str(high_frame), str(high_path))
             except Exception as e:
                 logger.warning(f"Failed to move high frame {high_frame}: {e}")
         
-        # Move low frames to selected directory
-        final_low = []
-        for low_frame in low_frames:
+        # Copy selected frames to selected directory (for API storage)
+        selected_dir = self.work_dir / "selected_frames"
+        selected_dir.mkdir(parents=True, exist_ok=True)
+        
+        final_selected_high = []
+        final_selected_low = []
+        
+        # Find selected frames and copy them to selected directory
+        for frame_num in selected_suffixes:
             try:
-                frame_num = int(low_frame.stem.split("_")[-1])
-                new_low = selected_dir / f"low_{frame_num:06d}.jpg"
-                shutil.move(str(low_frame), str(new_low))
-                final_low.append(new_low)
+                # Find high frame in high_dir
+                high_path = high_dir / f"high_{frame_num:06d}.jpg"
+                if high_path.exists():
+                    selected_high_path = selected_dir / f"high_{frame_num:06d}.jpg"
+                    shutil.copy2(str(high_path), str(selected_high_path))
+                    final_selected_high.append(selected_high_path)
+                
+                # Find low frame in Stella directory
+                stella_low_path = stella_dir / f"stella_{frame_num:06d}.jpg"
+                if stella_low_path.exists():
+                    selected_low_path = selected_dir / f"low_{frame_num:06d}.jpg"
+                    shutil.copy2(str(stella_low_path), str(selected_low_path))
+                    final_selected_low.append(selected_low_path)
             except Exception as e:
-                logger.warning(f"Failed to move low frame {low_frame}: {e}")
+                logger.warning(f"Failed to copy selected frame {frame_num} to selected directory: {e}")
         
-        # Sort by frame number (original frame index)
-        final_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
-        final_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        # Delete unselected high frames to save space
+        for high_path in high_dir.glob("high_*.jpg"):
+            try:
+                frame_num = int(high_path.stem.split("_")[-1])
+                if frame_num not in selected_suffixes:
+                    high_path.unlink()
+            except Exception as e:
+                logger.debug(f"Failed to delete unselected high frame {high_path}: {e}")
         
-        logger.info(f"Processed {len(final_high)} high-res and {len(final_low)} low-res frames")
-        update_status_callback(f"Processed {len(final_high)} frame pairs")
-        return final_high, final_low
+        # Sort all lists
+        final_selected_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        final_selected_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        stella_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        
+        logger.info(f"Selected {len(final_selected_high)} best frames (1 fps) for API storage")
+        logger.info(f"Prepared {len(stella_low)} low-res frames (10 fps) for Stella route calculation")
+        update_status_callback(f"Selected {len(final_selected_high)} best frames (1 fps) for API, {len(stella_low)} low-res frames for Stella")
+        
+        return final_selected_high, final_selected_low, stella_low
     
     def create_and_select_frames(self, stitched_path: Path, update_status_callback) -> Tuple[List[Path], List[Path]]:
         """Extract 1fps frames (high and low res) for API storage.

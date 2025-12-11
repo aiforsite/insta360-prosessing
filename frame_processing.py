@@ -360,6 +360,56 @@ class FrameProcessing:
                 logger.warning(f"Failed to move high frame {high_frame}: {e}")
                 continue
         
+        # Optimize MediaSDK frames by re-compressing with optimized JPG quality
+        # MediaSDK creates unoptimized JPG files (~7MB), re-compressing reduces size significantly (~3MB)
+        logger.info("Optimizing MediaSDK JPG frames...")
+        update_status_callback("Optimizing JPG compression...")
+        optimized_count = 0
+        total_size_before = 0
+        total_size_after = 0
+        
+        for temp_high in temp_high_frames:
+            try:
+                # Get original file size
+                original_size = temp_high.stat().st_size
+                total_size_before += original_size
+                
+                # Open and re-save with optimized quality
+                with Image.open(temp_high) as img:
+                    # Convert to RGB if necessary (some formats may have alpha channel)
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    
+                    # Save with quality=95 (high quality but optimized compression)
+                    # optimize=True enables Huffman table optimization
+                    temp_high_optimized = temp_high.parent / f"opt_{temp_high.name}"
+                    img.save(temp_high_optimized, quality=95, optimize=True)
+                    
+                    # Replace original with optimized
+                    optimized_size = temp_high_optimized.stat().st_size
+                    total_size_after += optimized_size
+                    
+                    temp_high.unlink()
+                    temp_high_optimized.rename(temp_high)
+                    
+                    optimized_count += 1
+                    
+                    # Log progress every 10 frames
+                    if optimized_count % 10 == 0:
+                        reduction = ((original_size - optimized_size) / original_size * 100) if original_size > 0 else 0
+                        logger.debug(f"Optimized {optimized_count}/{len(temp_high_frames)} frames (avg reduction: {reduction:.1f}%)")
+                        
+            except Exception as e:
+                logger.warning(f"Failed to optimize MediaSDK frame {temp_high}: {e}")
+                continue
+        
+        if optimized_count > 0:
+            total_reduction = ((total_size_before - total_size_after) / total_size_before * 100) if total_size_before > 0 else 0
+            logger.info(f"Optimized {optimized_count}/{len(temp_high_frames)} MediaSDK frames: "
+                       f"{total_size_before / (1024*1024):.2f}MB -> {total_size_after / (1024*1024):.2f}MB "
+                       f"({total_reduction:.1f}% reduction)")
+            update_status_callback(f"Optimized {optimized_count} frames ({total_reduction:.1f}% size reduction)")
+        
         # Create low-res versions for all frames
         low_dir = self.work_dir / "low_frames"
         low_dir.mkdir(parents=True, exist_ok=True)
@@ -406,10 +456,26 @@ class FrameProcessing:
         stella_low = []
         
         # Move all low frames to Stella directory
-        for low_frame in all_low_frames:
+        # IMPORTANT: Stella uses frame filename as timestamp, so we need to name frames using sequential numbering
+        # Frame indices are original video frame numbers (0, 3, 6, 9...), but Stella needs sequential numbering
+        # representing time in seconds at 10 fps (0.0s, 0.1s, 0.2s...)
+        # So frame index 0 = 0.0s = stella_000000.jpg, frame index 3 = 0.1s = stella_000001.jpg, etc.
+        logger.info(f"Naming {len(all_low_frames)} frames for Stella using sequential numbering (Stella uses frame number as timestamp)")
+        for idx, low_frame in enumerate(all_low_frames):
             try:
-                frame_num = int(low_frame.stem.split("_")[-1])
-                stella_low_path = stella_dir / f"stella_{frame_num:06d}.jpg"
+                # Get original frame index from filename
+                original_frame_idx = int(low_frame.stem.split("_")[-1])
+                
+                # Use sequential index (0, 1, 2, 3...) representing frame order at 10 fps
+                # This will be interpreted by Stella as timestamps: 0.0s, 0.1s, 0.2s, 0.3s...
+                stella_frame_num = idx  # Sequential frame number (0, 1, 2, 3...)
+                stella_low_path = stella_dir / f"stella_{stella_frame_num:06d}.jpg"
+                
+                # Log first few and last few mappings
+                if idx < 5 or idx >= len(all_low_frames) - 5:
+                    logger.info(f"Stella frame {stella_frame_num}: original_index={original_frame_idx}, "
+                               f"expected_time={stella_frame_num * 0.1:.1f}s, filename={stella_low_path.name}")
+                
                 shutil.move(str(low_frame), str(stella_low_path))
                 stella_low.append(stella_low_path)
             except Exception as e:
@@ -435,22 +501,28 @@ class FrameProcessing:
         final_selected_high = []
         final_selected_low = []
         
+        # Create mapping from original frame index to sequential index for Stella frames
+        # Stella frames are named using sequential index (0, 1, 2, 3...) representing time at 10 fps
+        frame_index_to_stella_index = {orig_idx: seq_idx for seq_idx, orig_idx in enumerate(frame_indices)}
+        
         # Find selected frames and copy them to selected directory
         for frame_num in selected_suffixes:
             try:
-                # Find high frame in high_dir
+                # Find high frame in high_dir (uses original frame index)
                 high_path = high_dir / f"high_{frame_num:06d}.jpg"
                 if high_path.exists():
                     selected_high_path = selected_dir / f"high_{frame_num:06d}.jpg"
                     shutil.copy2(str(high_path), str(selected_high_path))
                     final_selected_high.append(selected_high_path)
                 
-                # Find low frame in Stella directory
-                stella_low_path = stella_dir / f"stella_{frame_num:06d}.jpg"
-                if stella_low_path.exists():
-                    selected_low_path = selected_dir / f"low_{frame_num:06d}.jpg"
-                    shutil.copy2(str(stella_low_path), str(selected_low_path))
-                    final_selected_low.append(selected_low_path)
+                # Find low frame in Stella directory (uses sequential index, not original frame index)
+                stella_frame_num = frame_index_to_stella_index.get(frame_num)
+                if stella_frame_num is not None:
+                    stella_low_path = stella_dir / f"stella_{stella_frame_num:06d}.jpg"
+                    if stella_low_path.exists():
+                        selected_low_path = selected_dir / f"low_{frame_num:06d}.jpg"
+                        shutil.copy2(str(stella_low_path), str(selected_low_path))
+                        final_selected_low.append(selected_low_path)
             except Exception as e:
                 logger.warning(f"Failed to copy selected frame {frame_num} to selected directory: {e}")
         

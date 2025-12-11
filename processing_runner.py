@@ -403,9 +403,10 @@ class VideoProcessor:
                     layer_id = video_recording.get('layer')
                     if layer_id and self.processed_video_id:
                         self.update_status_text("Updating video frames with camera positions from route data...")
-                        # Extract start_position and end_position from video_recording if available
-                        start_position = video_recording.get('start_position')
-                        end_position = video_recording.get('end_position')
+                        # Extract starting_position and ending_position from video_recording if available
+                        # API uses 'starting_position' and 'ending_position' (not 'start_position' and 'end_position')
+                        start_position = video_recording.get('starting_position')
+                        end_position = video_recording.get('ending_position')
                         updated_count = self.api_client.update_video_frames_from_raw_path(
                             self.processed_video_id,
                             raw_path,

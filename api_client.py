@@ -784,11 +784,10 @@ class APIClient:
                 ending_position = (0.5, 0.5)
                 logger.info("start_position and end_position not specified, using default (0.5, 0.5)")
             
-            # If start and end are the same, use default values
+            # If start and end are the same, log warning but keep the values
+            # Don't override user-provided positions even if they're the same
             if starting_position == ending_position:
-                starting_position = (0.25, 0.5)
-                ending_position = (0.75, 0.5)
-                logger.info("start_position and end_position are the same, using default range")
+                logger.warning("start_position and end_position are the same - this may cause issues with route mapping")
             
             # Get layer image dimensions and corner GPS if available
             width = None

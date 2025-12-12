@@ -171,6 +171,9 @@ class FrameProcessing:
     def _select_best_frames_by_sharpness(self, high_frames: List[Path], candidates_per_second: int) -> set[int]:
         """Select best frames based on sharpness from each group of candidates_per_second frames.
         
+        Groups frames by second (based on frame number and candidates_per_second FPS),
+        then selects the sharpest frame from each second.
+        
         Uses parallel processing to calculate sharpness for all frames simultaneously.
         """
         if not high_frames:
@@ -213,24 +216,45 @@ class FrameProcessing:
             logger.warning("No high-res candidates found for selection")
             return set()
         
-        # Sort by suffix
+        # Sort by suffix (frame number)
         candidates_with_sharpness.sort(key=lambda x: x[0])
         
-        # Group by second and select sharpest from each group
+        # Log first few and last few frame numbers for debugging
+        if candidates_with_sharpness:
+            first_few = [x[0] for x in candidates_with_sharpness[:5]]
+            last_few = [x[0] for x in candidates_with_sharpness[-5:]]
+            logger.info(f"Frame number range: first few={first_few}, last few={last_few}, total={len(candidates_with_sharpness)}")
+        
+        # Group frames by second: frames are at candidates_per_second FPS, so
+        # frames 0-11 are in second 0, frames 12-23 are in second 1, etc.
+        # Calculate which second each frame belongs to: second = frame_number // candidates_per_second
+        frames_by_second: Dict[int, List[Tuple[int, Path, float]]] = {}
+        for suffix, path, sharpness in candidates_with_sharpness:
+            second = suffix // candidates_per_second
+            if second not in frames_by_second:
+                frames_by_second[second] = []
+            frames_by_second[second].append((suffix, path, sharpness))
+        
+        # Select sharpest frame from each second
         selected_suffixes = set()
-        for i in range(0, len(candidates_with_sharpness), candidates_per_second):
-            second_group = candidates_with_sharpness[i:i + candidates_per_second]
+        total_seconds = len(frames_by_second)
+        logger.info(f"Grouping {len(candidates_with_sharpness)} frames into {total_seconds} seconds (at {candidates_per_second} fps)")
+        
+        for second in sorted(frames_by_second.keys()):
+            second_group = frames_by_second[second]
             if not second_group:
-                break
+                continue
             
-            # Select sharpest from this group
+            # Select sharpest from this second
             best_suffix, best_path, best_sharpness = max(second_group, key=lambda x: x[2])
             selected_suffixes.add(best_suffix)
             
-            target_second = i // candidates_per_second
-            logger.debug(f"Second {target_second}: selected frame {best_suffix} (sharpness={best_sharpness:.2f})")
+            group_frame_numbers = [x[0] for x in second_group]
+            logger.debug(f"Second {second}: group frames={group_frame_numbers} (count={len(group_frame_numbers)}), selected frame {best_suffix} (sharpness={best_sharpness:.2f})")
         
-        logger.info(f"Selected {len(selected_suffixes)} best frames from {len(candidates_with_sharpness)} candidates")
+        logger.info(f"Selected {len(selected_suffixes)} best frames from {len(candidates_with_sharpness)} candidates across {total_seconds} seconds")
+        if len(selected_suffixes) != total_seconds:
+            logger.warning(f"Expected {total_seconds} selected frames (one per second) but got {len(selected_suffixes)}")
         return selected_suffixes
     
     def _detect_people_boxes(self, image: Image.Image) -> List[Tuple[int, int, int, int]]:
@@ -1048,8 +1072,53 @@ class FrameProcessing:
         selected_suffixes = self._select_best_frames_by_sharpness(all_high_frames, self.candidates_per_second)
         
         # Filter frames to only selected ones
-        selected_high = [f for f in all_high_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
-        selected_low = [f for f in all_low_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
+        def get_frame_suffix(frame_path: Path) -> Optional[int]:
+            """Extract frame suffix number from filename."""
+            try:
+                stem = frame_path.stem
+                if '_' in stem:
+                    return int(stem.split("_")[-1])
+                else:
+                    # Try to extract number from end
+                    match = re.search(r'(\d+)$', stem)
+                    if match:
+                        return int(match.group(1))
+                return None
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Could not extract frame suffix from {frame_path.name}: {e}")
+                return None
+        
+        selected_high = []
+        selected_low = []
+        
+        for frame in all_high_frames:
+            suffix = get_frame_suffix(frame)
+            if suffix is not None and suffix in selected_suffixes:
+                selected_high.append(frame)
+        
+        for frame in all_low_frames:
+            suffix = get_frame_suffix(frame)
+            if suffix is not None and suffix in selected_suffixes:
+                selected_low.append(frame)
+        
+        logger.info(f"Filtered to {len(selected_high)} high and {len(selected_low)} low frames from {len(selected_suffixes)} selected suffixes")
+        if len(selected_high) != len(selected_suffixes) or len(selected_low) != len(selected_suffixes):
+            logger.warning(f"Mismatch: selected_suffixes={len(selected_suffixes)}, selected_high={len(selected_high)}, selected_low={len(selected_low)}")
+            # Log some examples of selected_suffixes and what we found
+            sample_suffixes = sorted(list(selected_suffixes))[:10]
+            logger.warning(f"Sample selected_suffixes (first 10): {sample_suffixes}")
+            # Check what frame suffixes we actually have
+            high_suffixes = sorted([get_frame_suffix(f) for f in all_high_frames if get_frame_suffix(f) is not None])[:20]
+            low_suffixes = sorted([get_frame_suffix(f) for f in all_low_frames if get_frame_suffix(f) is not None])[:20]
+            logger.warning(f"Sample high frame suffixes (first 20): {high_suffixes}")
+            logger.warning(f"Sample low frame suffixes (first 20): {low_suffixes}")
+            # Check if selected_suffixes are in the frame lists
+            missing_high = [s for s in sample_suffixes if s not in high_suffixes]
+            missing_low = [s for s in sample_suffixes if s not in low_suffixes]
+            if missing_high:
+                logger.warning(f"Selected suffixes not found in high frames: {missing_high}")
+            if missing_low:
+                logger.warning(f"Selected suffixes not found in low frames: {missing_low}")
         
         # Move selected frames to selected directory
         selected_dir = self.work_dir / "selected_frames"

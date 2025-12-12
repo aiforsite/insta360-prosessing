@@ -743,7 +743,6 @@ class FrameProcessing:
         2. Calculate times_in_video for each frame
         3. Call batch-create to create frames and images (gets upload URLs)
         4. Upload image binaries to upload URLs
-        5. Register images using batch-update
         
         Args:
             frame_paths: List of frame paths to upload
@@ -897,67 +896,6 @@ class FrameProcessing:
         
         logger.info(f"Uploaded {completed}/{len(upload_tasks)} image binaries")
         
-        # Step 3: Register images using batch-update
-        update_status_callback("Registering images...")
-        update_data = []
-        for idx, created_frame in enumerate(created_frames):
-            if idx >= len(sorted_suffixes):
-                break
-            
-            # Extract frame UUID - handle both dict and string formats
-            frame_data = created_frame.get('frame')
-            if isinstance(frame_data, dict):
-                frame_uuid = frame_data.get('uuid')
-            elif isinstance(frame_data, str):
-                frame_uuid = frame_data
-            else:
-                logger.warning(f"Created frame at index {idx} has invalid frame data: {frame_data}")
-                continue
-            
-            if not frame_uuid:
-                logger.warning(f"Created frame at index {idx} missing frame UUID")
-                continue
-            
-            # Prepare update data to register images
-            frame_update = {
-                'frame': frame_uuid,
-            }
-            
-            # Add image entries if UUIDs exist - handle both dict and string formats
-            def extract_uuid(data, key: str) -> Optional[str]:
-                """Extract UUID from data, handling both dict and string formats."""
-                value = data.get(key) if isinstance(data, dict) else None
-                if isinstance(value, dict):
-                    return value.get('uuid')
-                elif isinstance(value, str):
-                    return value
-                return None
-            
-            image_uuid = extract_uuid(created_frame, 'image')
-            high_image_uuid = extract_uuid(created_frame, 'high_image')
-            
-            if image_uuid:
-                frame_update['image'] = {'uuid': image_uuid, 'register': True}
-            if high_image_uuid:
-                frame_update['high_image'] = {'uuid': high_image_uuid, 'register': True}
-            
-            if blur_people:
-                blur_low_uuid = extract_uuid(created_frame, 'blur_image')
-                blur_high_uuid = extract_uuid(created_frame, 'blur_high_image')
-                if blur_low_uuid:
-                    frame_update['blur_image'] = {'uuid': blur_low_uuid, 'register': True}
-                if blur_high_uuid:
-                    frame_update['blur_high_image'] = {'uuid': blur_high_uuid, 'register': True}
-            
-            update_data.append(frame_update)
-        
-        if update_data:
-            success = api_client.batch_update_video_frames(update_data)
-            if success:
-                logger.info(f"Registered {len(update_data)} image sets")
-            else:
-                logger.error("Failed to register images with batch-update")
-        
         # Return frame objects (for compatibility)
         frame_objects = []
         for idx, created_frame in enumerate(created_frames):
@@ -981,7 +919,7 @@ class FrameProcessing:
         """Create video frame objects in API using batch-create endpoint.
         
         Note: Images are already uploaded, so we use batch-create to create frames and images,
-        then batch-update to link uploaded images to the created image objects.
+        and return created frame UUIDs (no register/batch-update step).
         """
         saved_frame_ids: List[str] = []
         if not frame_collections:
@@ -1037,61 +975,14 @@ class FrameProcessing:
             return saved_frame_ids
         
         logger.info(f"Created {len(created_frames)} video frames with batch-create")
-        
-        # Step 2: Prepare batch-update data to link uploaded images to created image objects
-        # and register images after upload
-        update_data = []
+
         for idx, created_frame in enumerate(created_frames):
             frame_uuid = created_frame.get('frame', {}).get('uuid')
             if not frame_uuid:
                 logger.warning(f"Created frame missing UUID at index {idx}")
                 continue
-            
             saved_frame_ids.append(frame_uuid)
-            
-            # Get corresponding images from frame_collections
-            suffix = sorted_suffixes[idx] if idx < len(sorted_suffixes) else None
-            if suffix is None:
-                continue
-            
-            images = suffix_to_images.get(suffix, {})
-            high_id = images.get('high') or images.get('blurred_high')
-            low_id = images.get('low') or images.get('blurred_low')
-            blur_high_id = images.get('blurred_high')
-            blur_low_id = images.get('blurred_low')
-            
-            # Get created image UUIDs from batch-create response
-            created_high_uuid = created_frame.get('high_image', {}).get('uuid')
-            created_low_uuid = created_frame.get('image', {}).get('uuid')
-            created_blur_high_uuid = created_frame.get('blur_high_image', {}).get('uuid') if blur_people else None
-            created_blur_low_uuid = created_frame.get('blur_image', {}).get('uuid') if blur_people else None
-            
-            # Prepare update data: link uploaded images to created image objects
-            # Note: We need to update the created image objects with the uploaded image UUIDs
-            # This might require a different approach - for now, we'll just register the images
-            frame_update = {
-                'frame': frame_uuid,
-                'image': {'uuid': created_low_uuid, 'register': True} if created_low_uuid else None,
-                'high_image': {'uuid': created_high_uuid, 'register': True} if created_high_uuid else None,
-            }
-            
-            if created_blur_low_uuid:
-                frame_update['blur_image'] = {'uuid': created_blur_low_uuid, 'register': True}
-            if created_blur_high_uuid:
-                frame_update['blur_high_image'] = {'uuid': created_blur_high_uuid, 'register': True}
-            
-            # Remove None values
-            frame_update = {k: v for k, v in frame_update.items() if v is not None}
-            update_data.append(frame_update)
-        
-        # Step 3: Register images after upload (images are already uploaded, just need to register)
-        if update_data:
-            update_status_callback("Registering images...")
-            # Note: Images are already uploaded, we just need to register them
-            # But wait - batch-create creates NEW image objects, we need to link uploaded images to them
-            # This requires a different approach - we might need to update the image UUIDs
-            # For now, let's skip this step and handle it differently
-            
+
         update_status_callback(f"Created {len(saved_frame_ids)} video frames")
         return saved_frame_ids
     

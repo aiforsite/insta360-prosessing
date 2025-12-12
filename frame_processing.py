@@ -815,6 +815,9 @@ class FrameProcessing:
             return []
         
         logger.info(f"Created {len(created_frames)} video frames with batch-create")
+        # Log first frame structure for debugging
+        if created_frames and len(created_frames) > 0:
+            logger.debug(f"First created frame structure: {created_frames[0]}")
         
         # Step 2: Upload image binaries to upload URLs
         update_status_callback(f"Uploading {len(frame_paths)} image binaries...")
@@ -898,27 +901,51 @@ class FrameProcessing:
             if idx >= len(sorted_suffixes):
                 break
             
-            frame_uuid = created_frame.get('frame', {}).get('uuid')
+            # Extract frame UUID - handle both dict and string formats
+            frame_data = created_frame.get('frame')
+            if isinstance(frame_data, dict):
+                frame_uuid = frame_data.get('uuid')
+            elif isinstance(frame_data, str):
+                frame_uuid = frame_data
+            else:
+                logger.warning(f"Created frame at index {idx} has invalid frame data: {frame_data}")
+                continue
+            
             if not frame_uuid:
+                logger.warning(f"Created frame at index {idx} missing frame UUID")
                 continue
             
             # Prepare update data to register images
             frame_update = {
                 'frame': frame_uuid,
-                'image': {'uuid': created_frame.get('image', {}).get('uuid'), 'register': True},
-                'high_image': {'uuid': created_frame.get('high_image', {}).get('uuid'), 'register': True},
             }
             
+            # Add image entries if UUIDs exist - handle both dict and string formats
+            def extract_uuid(data, key: str) -> Optional[str]:
+                """Extract UUID from data, handling both dict and string formats."""
+                value = data.get(key) if isinstance(data, dict) else None
+                if isinstance(value, dict):
+                    return value.get('uuid')
+                elif isinstance(value, str):
+                    return value
+                return None
+            
+            image_uuid = extract_uuid(created_frame, 'image')
+            high_image_uuid = extract_uuid(created_frame, 'high_image')
+            
+            if image_uuid:
+                frame_update['image'] = {'uuid': image_uuid, 'register': True}
+            if high_image_uuid:
+                frame_update['high_image'] = {'uuid': high_image_uuid, 'register': True}
+            
             if blur_people:
-                blur_low_uuid = created_frame.get('blur_image', {}).get('uuid')
-                blur_high_uuid = created_frame.get('blur_high_image', {}).get('uuid')
+                blur_low_uuid = extract_uuid(created_frame, 'blur_image')
+                blur_high_uuid = extract_uuid(created_frame, 'blur_high_image')
                 if blur_low_uuid:
                     frame_update['blur_image'] = {'uuid': blur_low_uuid, 'register': True}
                 if blur_high_uuid:
                     frame_update['blur_high_image'] = {'uuid': blur_high_uuid, 'register': True}
             
-            # Remove None values
-            frame_update = {k: v for k, v in frame_update.items() if v and v.get('uuid')}
             update_data.append(frame_update)
         
         if update_data:

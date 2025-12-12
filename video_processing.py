@@ -543,7 +543,6 @@ class VideoProcessing:
                 self.mediasdk_executable,
                 '-inputs', str(front_path), str(back_path),  # Both inputs after single -inputs parameter
                 '-disable_cuda', 'false' if not self.disable_cuda else 'true',
-                '-enable_debug_info', self.enable_debug_info,
                 '-output_size', self.output_size,
                 '-enable_directionlock', self.enable_directionlock,
                 '-enable_flowstate', self.enable_flowstate,
@@ -551,6 +550,9 @@ class VideoProcessing:
             ]
             
             # Add optional parameters if configured
+            if self.enable_debug_info == "ON":
+                cmd.extend(['-enable_debug_info', 'ON'])
+
             if self.stitch_type:
                 cmd.extend(['-stitch_type', self.stitch_type])
             

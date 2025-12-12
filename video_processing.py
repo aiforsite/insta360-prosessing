@@ -439,8 +439,7 @@ class VideoProcessing:
                 '-inputs', str(front_path), str(back_path),
                 '-disable_cuda', 'false' if not self.disable_cuda else 'true',
                 '-enable_debug_info', self.enable_debug_info,
-                '-enable_soft_encode', 'false',
-                '-enable_h265_encoder', 'h265' if self.enable_h265_encoder else 'false',
+                '-enable_h265_encoder', 'h265',
                 '-output_size', self.output_size,
                 '-enable_directionlock', self.enable_directionlock,
                 '-enable_flowstate', self.enable_flowstate,
@@ -512,12 +511,10 @@ class VideoProcessing:
             return False
     
     def stitch_videos(self, front_path: Path, back_path: Path, output_path: Path, update_status_callback) -> bool:
-        """Execute stitching of videos to output file using MediaSDKTest.
+        """Execute stitching of videos to H265 MP4 output file using MediaSDKTest.
         
-        NOTE: This method is kept for backward compatibility but is no longer used.
-        Use extract_frames_direct() instead to extract frames without creating intermediate video.
+        Creates an intermediate H265-encoded MP4 video that can be used for frame extraction with FFmpeg.
         """
-        logger.warning("stitch_videos() is deprecated. Use extract_frames_direct() instead.")
         # Keep old implementation for backward compatibility if needed
         logger.info("Stitching videos...")
         update_status_callback("Stitching videos...")
@@ -577,8 +574,12 @@ class VideoProcessing:
             if self.bitrate:
                 cmd.extend(['-bitrate', str(self.bitrate)])
             
+            # Always use H265 encoder for intermediate video
             if self.enable_h265_encoder:
-                cmd.extend(['-enable_h265_encoder'])
+                cmd.extend(['-enable_h265_encoder', 'h265'])
+            else:
+                # Force H265 even if not explicitly enabled in config
+                cmd.extend(['-enable_h265_encoder', 'h265'])
             # Use environment variables as-is (Windows doesn't need LD_LIBRARY_PATH)
             env = os.environ.copy()
             
@@ -637,10 +638,10 @@ class VideoProcessing:
         video_duration: Optional[float] = None
     ) -> Optional[str]:
         """
-        Create video object in API without uploading binary.
+        Store stitched video to API.
         
         Args:
-            stitched_path: Optional path to stitched video (not used, kept for compatibility)
+            stitched_path: Path to stitched video file (H265 MP4)
             project_id: Project UUID
             video_recording: Video recording dict
             api_client: API client instance
@@ -651,24 +652,33 @@ class VideoProcessing:
             Video UUID if successful, None otherwise
         """
         try:
-            video_name = stitched_path.name if stitched_path and stitched_path.exists() else 'stitched_video.mp4'
-            video_recording_id = video_recording.get('uuid') if video_recording else api_client.current_video_recording_id
+            if not stitched_path or not stitched_path.exists():
+                logger.error(f"Stitched video file not found: {stitched_path}")
+                return None
             
-            # Create video object without uploading binary
-            # We'll use a minimal size (0 or 1) since we're not uploading the binary
+            video_name = stitched_path.name
+            video_recording_id = video_recording.get('uuid') if video_recording else api_client.current_video_recording_id
+            video_size = stitched_path.stat().st_size
+            
+            # Read video binary
+            logger.info(f"Reading stitched video file: {stitched_path} ({video_size:,} bytes)")
+            with open(stitched_path, 'rb') as f:
+                video_binary = f.read()
+            
+            # Store video with binary
             video_id = api_client.store_video(
                 project_id=project_id,
                 video_recording_id=video_recording_id,
                 video_type=video_type,
-                video_size=0,  # No binary to upload
-                video_binary=b'',  # Empty binary
+                video_size=video_size,
+                video_binary=video_binary,
                 name=video_name
             )
             if video_id:
-                logger.info(f"Created processed video object with ID {video_id} (no binary uploaded)")
+                logger.info(f"Stored processed video with ID {video_id} ({video_size:,} bytes uploaded)")
             return video_id
         except Exception as exc:
-            logger.error(f"Failed to create processed video object: {exc}")
+            logger.error(f"Failed to store processed video: {exc}")
             return None
     
     def select_fallback_video_id(

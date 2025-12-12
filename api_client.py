@@ -151,12 +151,19 @@ class APIClient:
         """
         url = f"{self.api_domain}{endpoint}"
         
+        # Prepare headers - if using 'data' parameter (form-data), don't set Content-Type
+        # requests will set it automatically to application/x-www-form-urlencoded
+        headers = self.headers.copy()
+        if 'data' in kwargs and 'json' not in kwargs:
+            # Remove Content-Type header to let requests set it automatically for form-data
+            headers.pop('Content-Type', None)
+        
         for attempt in range(max_retries):
             try:
                 response = requests.request(
                     method,
                     url,
-                    headers=self.headers,
+                    headers=headers,
                     **kwargs
                 )
                 response.raise_for_status()

@@ -1030,4 +1030,116 @@ class FrameProcessing:
         logger.info(f"Using {len(low_frames)} low res frames for route calculation...")
         update_status_callback(f"Using {len(low_frames)} low res frames for route calculation...")
         return low_frames
+    
+    def select_frames_from_extracted(self, all_high_frames: List[Path], all_low_frames: List[Path], update_status_callback) -> Tuple[List[Path], List[Path]]:
+        """Select best frames (1 fps) from already extracted frames (12 fps).
+        
+        Args:
+            all_high_frames: All high-res frames extracted at candidates_per_second fps
+            all_low_frames: All low-res frames extracted at candidates_per_second fps
+            update_status_callback: Status update callback
+        
+        Returns:
+            Tuple of (selected_high, selected_low) - best frames for API storage (1 fps)
+        """
+        update_status_callback("Selecting sharpest frames from each second...")
+        
+        # Select best frames based on sharpness (one per second)
+        selected_suffixes = self._select_best_frames_by_sharpness(all_high_frames, self.candidates_per_second)
+        
+        # Filter frames to only selected ones
+        selected_high = [f for f in all_high_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
+        selected_low = [f for f in all_low_frames if int(f.stem.split("_")[-1]) in selected_suffixes]
+        
+        # Move selected frames to selected directory
+        selected_dir = self.work_dir / "selected_frames"
+        selected_dir.mkdir(parents=True, exist_ok=True)
+        
+        final_high = []
+        final_low = []
+        
+        # Sort selected frames by suffix to ensure correct pairing
+        selected_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        selected_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        
+        # Move frames in parallel
+        def move_frame_pair(high_frame: Path, low_frame: Path) -> Tuple[Path, Path]:
+            """Move a pair of frames to selected directory."""
+            suffix = high_frame.stem.split("_")[-1]
+            new_high = selected_dir / f"high_{suffix}.jpg"
+            new_low = selected_dir / f"low_{suffix}.jpg"
+            
+            shutil.move(str(high_frame), str(new_high))
+            shutil.move(str(low_frame), str(new_low))
+            
+            return new_high, new_low
+        
+        logger.debug(f"Moving {len(selected_high)} selected frame pairs...")
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_pair = {
+                executor.submit(move_frame_pair, high, low): (high, low)
+                for high, low in zip(selected_high, selected_low)
+            }
+            
+            for future in as_completed(future_to_pair):
+                new_high, new_low = future.result()
+                final_high.append(new_high)
+                final_low.append(new_low)
+        
+        # Sort final lists by suffix
+        final_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        final_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
+        
+        update_status_callback(f"Selected {len(final_high)} best frames (1 fps)")
+        return final_high, final_low
+    
+    def prepare_stella_frames_from_extracted(self, all_low_frames: List[Path], target_fps: float = 10.0, source_fps: float = 12.0) -> List[Path]:
+        """Prepare frames for Stella from already extracted frames.
+        
+        Filters frames from source_fps to target_fps (e.g., 12 fps -> 10 fps).
+        Moves frames to stella_frames directory with sequential naming for Stella.
+        
+        Args:
+            all_low_frames: All low-res frames extracted at source_fps
+            target_fps: Target FPS for Stella (default: 10.0)
+            source_fps: Source FPS of extracted frames (default: 12.0)
+        
+        Returns:
+            List of frame paths for Stella route calculation
+        """
+        if not all_low_frames:
+            return []
+        
+        # Sort frames by frame number
+        sorted_frames = sorted(all_low_frames, key=lambda f: int(f.stem.split("_")[-1]))
+        
+        # Filter frames to target FPS
+        filtered_frames = []
+        frames_per_group = int(round(source_fps))
+        frames_to_take = int(round(target_fps))
+        
+        # If target_fps >= source_fps, use all frames (no filtering needed)
+        if frames_to_take >= frames_per_group:
+            filtered_frames = sorted_frames
+            logger.info(f"Using all {len(filtered_frames)} frames (target_fps {target_fps} >= source_fps {source_fps})")
+        else:
+            # Filter frames: take frames_to_take frames out of every frames_per_group
+            # For example, 12 fps -> 10 fps: take 10 frames out of every 12
+            for group_start in range(0, len(sorted_frames), frames_per_group):
+                group = sorted_frames[group_start:group_start + frames_per_group]
+                # Take first frames_to_take frames from each group
+                filtered_frames.extend(group[:frames_to_take])
+        
+        # Move frames to Stella directory with sequential naming
+        stella_dir = self.work_dir / "stella_frames"
+        stella_dir.mkdir(parents=True, exist_ok=True)
+        
+        stella_frames = []
+        for idx, frame in enumerate(filtered_frames):
+            stella_frame_path = stella_dir / f"stella_{idx:06d}.jpg"
+            shutil.copy2(str(frame), str(stella_frame_path))
+            stella_frames.append(stella_frame_path)
+        
+        logger.info(f"Prepared {len(stella_frames)} frames for Stella (from {len(all_low_frames)} frames at {source_fps} fps -> {target_fps} fps)")
+        return stella_frames
 

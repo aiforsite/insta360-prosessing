@@ -789,6 +789,20 @@ class APIClient:
             if starting_position == ending_position:
                 logger.warning("start_position and end_position are the same - this may cause issues with route mapping")
             
+            # Define get_rx_ry function before using it in transformation verification
+            def get_rx_ry(pixel_coordinate: List[float], img_width: Optional[int] = None, img_height: Optional[int] = None) -> Tuple[float, float]:
+                """Return rx, ry values (may be outside 0.0-1.0 range to preserve route shape).
+                
+                Note: pixel_coordinate contains [x, z] from Stella, but we need to swap them:
+                - rx = z (horizontal position on layer)
+                - ry = x (vertical position on layer)
+                """
+                # Swap x and z coordinates: rx = z, ry = x
+                rx, ry = pixel_coordinate[1], pixel_coordinate[0]
+                # Don't clamp - allow values outside 0-1 range to preserve route shape
+                # Server should accept any float values
+                return float(rx), float(ry)
+            
             # Try to use similarity transformation (nudged) to preserve route shape
             # If that fails or nudged is not available, use raw coordinates directly
             cartesian_path = []
@@ -803,9 +817,14 @@ class APIClient:
                     zN_original = raw_path_xz[-1][1]
                     
                     # Use similarity transformation to preserve route shape
-                    # Map first point to starting_position and last point to ending_position
+                    # IMPORTANT: get_rx_ry swaps coordinates (rx = z, ry = x)
+                    # So we need to map [x, z] to [ry, rx] in the transformation
+                    # domain_points: [x, z] from Stella
+                    # range_points: [ry, rx] for the transformation (will be swapped back in get_rx_ry)
                     domain_points = [[x1_original, z1_original], [xN_original, zN_original]]
-                    range_points = [[starting_position[0], starting_position[1]], [ending_position[0], ending_position[1]]]
+                    # Map to [ry, rx] because get_rx_ry will swap: rx = z, ry = x
+                    # So if we want starting_position = (rx_start, ry_start), we need to map to [ry_start, rx_start]
+                    range_points = [[starting_position[1], starting_position[0]], [ending_position[1], ending_position[0]]]
                     
                     # Estimate similarity transformation (preserves angles and ratios)
                     trans = nudged.estimate(domain_points, range_points)
@@ -813,7 +832,16 @@ class APIClient:
                     # Transform all raw_path points using similarity transformation
                     for point in raw_path_xz:
                         transformed = trans.transform(point)
+                        # Store as [x, z] - get_rx_ry will swap them to [rx, ry]
                         cartesian_path.append([float(transformed[0]), float(transformed[1])])
+                    
+                    # Verify first point maps correctly
+                    first_transformed = cartesian_path[0]
+                    first_rx_ry = get_rx_ry(first_transformed)
+                    logger.info(f"Similarity transformation: first point [x={raw_path_xz[0][0]:.3f}, z={raw_path_xz[0][1]:.3f}] -> "
+                               f"[x'={first_transformed[0]:.3f}, z'={first_transformed[1]:.3f}] -> "
+                               f"rx={first_rx_ry[0]:.3f}, ry={first_rx_ry[1]:.3f} "
+                               f"(expected: rx={starting_position[0]:.3f}, ry={starting_position[1]:.3f})")
                     
                     use_similarity_transform = True
                     logger.info("Using similarity transformation to preserve route shape")
@@ -829,19 +857,6 @@ class APIClient:
                 # Use raw coordinates as-is, just convert to float
                 for point in raw_path_xz:
                     cartesian_path.append([float(point[0]), float(point[1])])
-            
-            def get_rx_ry(pixel_coordinate: List[float], img_width: Optional[int] = None, img_height: Optional[int] = None) -> Tuple[float, float]:
-                """Return rx, ry values (may be outside 0.0-1.0 range to preserve route shape).
-                
-                Note: pixel_coordinate contains [x, z] from Stella, but we need to swap them:
-                - rx = z (horizontal position on layer)
-                - ry = x (vertical position on layer)
-                """
-                # Swap x and z coordinates: rx = z, ry = x
-                rx, ry = pixel_coordinate[1], pixel_coordinate[0]
-                # Don't clamp - allow values outside 0-1 range to preserve route shape
-                # Server should accept any float values
-                return float(rx), float(ry)
             
             # Fetch all video frames
             if update_status_callback:
@@ -891,6 +906,12 @@ class APIClient:
                     # Calculate rx and ry (already calculated in cartesian_path, just extract)
                     rx, ry = get_rx_ry(cartesian_point)
                     
+                    # Log first frame coordinates for debugging
+                    if idx == 0:
+                        logger.info(f"First frame (idx=0, time={time_in_video}s): "
+                                   f"cartesian_point={cartesian_point}, rx={rx}, ry={ry}, "
+                                   f"starting_position={starting_position}")
+                    
                     frame_id = frame.get('uuid')
                     if not frame_id:
                         logger.warning(f"Video frame missing UUID, skipping")
@@ -916,10 +937,7 @@ class APIClient:
                     if not success:
                         failed_count += 1
                     
-                    # Add small delay between frame updates to avoid overwhelming the server
-                    # Only delay if not the last frame
-                    if updated_count + failed_count < len(frames):
-                        time.sleep(0.1)  # 100ms delay between updates
+                    # No delay between frame updates - API should handle concurrent requests
                         
                 except (ValueError, IndexError, TypeError) as e:
                     logger.warning(f"Failed to process frame {frame.get('uuid')}: {e}")

@@ -68,6 +68,7 @@ class VideoProcessor:
         self.low_res_fps = self.config['low_res_frames_per_second']
         self.route_fps = self.config['route_calculation_fps']
         self.candidates_per_second = self.config.get('candidates_per_second', 12)
+        self.stella_fps = self.config.get('stella_fps', 12)  # FPS for Stella route calculation
         self.frame_upload_parallelism = self.config.get('frame_upload_parallelism', 8)
         
         # General processing configuration
@@ -296,28 +297,40 @@ class VideoProcessor:
                     logger.warning("Could not determine video duration, defaulting to 10 minutes")
                     video_duration = 600.0  # 10 minutes
             
-            # Step 6: Extract frames from stitched video using FFmpeg
-            # First extract at candidates_per_second fps for frame selection (1 fps for API)
-            # create_and_select_frames will extract frames and select best ones
-            selected_high, selected_low = self.frame_processing.create_and_select_frames(
+            # Step 6: Extract frames from stitched video using FFmpeg (once at candidates_per_second fps)
+            # Extract frames at candidates_per_second fps (12 fps) - these will be used for both:
+            # 1. Frame selection (1 fps for API) - select best from each second
+            # 2. Stella route calculation (10 fps) - use all frames at 10 fps (subset of 12 fps)
+            high_dir = self.work_dir / "high_frames"
+            low_dir = self.work_dir / "low_frames"
+            all_high_frames, all_low_frames = self.frame_processing.extract_frames_high_and_low(
                 stitched_path,
+                high_dir,
+                low_dir,
+                fps=float(self.frame_processing.candidates_per_second)  # Extract at 12 fps (candidates_per_second)
+            )
+            if not all_high_frames or not all_low_frames:
+                raise Exception(f"Failed to extract frames (got {len(all_high_frames)} high and {len(all_low_frames)} low frames)")
+            
+            # Step 7: Select best frames (1 fps) from extracted frames for API storage
+            selected_high, selected_low = self.frame_processing.select_frames_from_extracted(
+                all_high_frames,
+                all_low_frames,
                 self.update_status_text
             )
             if not selected_high or not selected_low:
                 raise Exception(f"Failed to select frames (got {len(selected_high)} high and {len(selected_low)} low frames)")
             
-            # Step 7: Extract all frames at 10 fps for Stella route calculation
-            # Extract high-res frames (max resolution) and low-res frames (3840x1920) at 10 fps
-            stella_high_dir = self.work_dir / "stella_high_frames"
-            stella_low_dir = self.work_dir / "stella_low_frames"
-            stella_high_frames, stella_low_frames = self.frame_processing.extract_frames_high_and_low(
-                stitched_path,
-                stella_high_dir,
-                stella_low_dir,
-                fps=10.0  # Extract at 10 fps for Stella route calculation
+            # Step 8: Prepare frames for Stella route calculation
+            # Use configured stella_fps (default 12 fps) to get smoother route tracking
+            # Higher FPS helps Stella avoid rounding 90-degree turns
+            stella_low_frames = self.frame_processing.prepare_stella_frames_from_extracted(
+                all_low_frames,
+                target_fps=float(self.stella_fps),
+                source_fps=float(self.frame_processing.candidates_per_second)
             )
             if not stella_low_frames:
-                raise Exception(f"Failed to extract Stella frames (got {len(stella_low_frames)} low frames)")
+                raise Exception(f"Failed to prepare Stella frames (got {len(stella_low_frames)} low frames)")
             
             # Step 8: Store stitched video to API
             stitched_video_id = None
@@ -368,13 +381,10 @@ class VideoProcessor:
                 max_workers=self.frame_upload_parallelism
             )
             
-            # Step 11: Prepare all low-res frames (10 fps) for Stella route calculation
-            # Use all low-res frames extracted at 10 fps (not just selected ones)
-            route_frames = self.frame_processing.get_route_frames_from_low_res(
-                stella_low_frames,  # All 10 fps low-res frames for Stella
-                self.update_status_text
-            )
-            logger.info(f"Using {len(route_frames)} frames (10 fps) for Stella route calculation")
+            # Step 11: Use prepared Stella frames for route calculation
+            # stella_low_frames are already prepared at configured stella_fps
+            route_frames = stella_low_frames
+            logger.info(f"Using {len(route_frames)} frames ({self.stella_fps} fps) for Stella route calculation")
             
             # Step 12: Calculate route using Stella VSLAM (via WSL if configured)
             route_data = self.route_calculation.calculate_route(

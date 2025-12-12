@@ -438,7 +438,6 @@ class VideoProcessing:
                 self.mediasdk_executable,
                 '-inputs', str(front_path), str(back_path),
                 '-disable_cuda', 'false' if not self.disable_cuda else 'true',
-                '-enable_debug_info', self.enable_debug_info,
                 '-enable_h265_encoder', 'h265',
                 '-output_size', self.output_size,
                 '-enable_directionlock', self.enable_directionlock,
@@ -450,6 +449,8 @@ class VideoProcessing:
             ]
             
             # Add optional parameters if configured
+            if self.enable_debug_info == "ON":
+                cmd.extend(['-enable_debug_info', 'ON'])
             if self.ai_stitching_model and self.stitch_type == 'aistitch':
                 cmd.extend(['-ai_stitching_model', self.ai_stitching_model])
             

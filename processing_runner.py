@@ -264,6 +264,11 @@ class VideoProcessor:
             if not video_recording:
                 raise Exception("Failed to fetch video-recording data")
             
+            # Log video_recording keys and starting/ending_position values for debugging
+            logger.info(f"Video recording keys: {list(video_recording.keys())}")
+            logger.info(f"Video recording starting_position: {video_recording.get('starting_position')}")
+            logger.info(f"Video recording ending_position: {video_recording.get('ending_position')}")
+            
             front_path, back_path = self.video_processing.download_videos(
                 video_recording,
                 self.api_client,
@@ -421,6 +426,29 @@ class VideoProcessor:
                         # API uses 'starting_position' and 'ending_position' (not 'start_position' and 'end_position')
                         start_position = video_recording.get('starting_position')
                         end_position = video_recording.get('ending_position')
+                        
+                        # Log what we got from video_recording
+                        logger.info(f"Video recording object keys: {list(video_recording.keys())}")
+                        logger.info(f"Starting position from video_recording: {start_position} (type: {type(start_position)})")
+                        logger.info(f"Ending position from video_recording: {end_position} (type: {type(end_position)})")
+                        
+                        # Check if positions are in correct format
+                        if start_position:
+                            if isinstance(start_position, dict):
+                                logger.info(f"Start position dict keys: {list(start_position.keys())}, values: {start_position}")
+                            else:
+                                logger.warning(f"Start position is not a dict: {start_position} (type: {type(start_position)})")
+                        else:
+                            logger.warning("Start position is None or missing from video_recording")
+                        
+                        if end_position:
+                            if isinstance(end_position, dict):
+                                logger.info(f"End position dict keys: {list(end_position.keys())}, values: {end_position}")
+                            else:
+                                logger.warning(f"End position is not a dict: {end_position} (type: {type(end_position)})")
+                        else:
+                            logger.warning("End position is None or missing from video_recording")
+                        
                         updated_count = self.api_client.update_video_frames_from_raw_path(
                             self.processed_video_id,
                             raw_path,

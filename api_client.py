@@ -766,6 +766,10 @@ class APIClient:
             starting_position = None
             ending_position = None
             
+            # Log what we received
+            logger.info(f"Received start_position: {start_position} (type: {type(start_position)})")
+            logger.info(f"Received end_position: {end_position} (type: {type(end_position)})")
+            
             # Check if start_position and end_position are dicts and have required keys
             if (start_position and isinstance(start_position, dict) and 
                 end_position and isinstance(end_position, dict) and
@@ -774,6 +778,7 @@ class APIClient:
                 try:
                     starting_position = (float(start_position['rx']), float(start_position['ry']))
                     ending_position = (float(end_position['rx']), float(end_position['ry']))
+                    logger.info(f"Parsed starting_position: {starting_position}, ending_position: {ending_position}")
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Error parsing start_position/end_position: {e}, using defaults")
                     starting_position = (0.5, 0.5)
@@ -782,7 +787,21 @@ class APIClient:
                 # Use default 0.5 for both if not specified
                 starting_position = (0.5, 0.5)
                 ending_position = (0.5, 0.5)
-                logger.info("start_position and end_position not specified, using default (0.5, 0.5)")
+                if not start_position:
+                    logger.warning("start_position is None or missing")
+                elif not isinstance(start_position, dict):
+                    logger.warning(f"start_position is not a dict, got {type(start_position)}: {start_position}")
+                elif 'rx' not in start_position or 'ry' not in start_position:
+                    logger.warning(f"start_position dict missing 'rx' or 'ry' keys, got keys: {start_position.keys()}")
+                
+                if not end_position:
+                    logger.warning("end_position is None or missing")
+                elif not isinstance(end_position, dict):
+                    logger.warning(f"end_position is not a dict, got {type(end_position)}: {end_position}")
+                elif 'rx' not in end_position or 'ry' not in end_position:
+                    logger.warning(f"end_position dict missing 'rx' or 'ry' keys, got keys: {end_position.keys()}")
+                
+                logger.info("Using default positions (0.5, 0.5) for both start and end")
             
             # If start and end are the same, log warning but keep the values
             # Don't override user-provided positions even if they're the same

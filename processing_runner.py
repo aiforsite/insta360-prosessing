@@ -68,7 +68,9 @@ class VideoProcessor:
         self.low_res_fps = self.config['low_res_frames_per_second']
         self.route_fps = self.config['route_calculation_fps']
         self.candidates_per_second = self.config.get('candidates_per_second', 12)
-        self.stella_fps = self.config.get('stella_fps', 12)  # FPS for Stella route calculation
+        # FPS for Stella route calculation. If not explicitly set, default to the extraction FPS
+        # (candidates_per_second) to avoid surprising "12fps" defaults when config omits stella_fps.
+        self.stella_fps = self.config.get('stella_fps', self.candidates_per_second)
         self.frame_upload_parallelism = self.config.get('frame_upload_parallelism', 8)
         
         # General processing configuration
@@ -312,7 +314,7 @@ class VideoProcessor:
                 stitched_path,
                 high_dir,
                 low_dir,
-                fps=float(self.frame_processing.candidates_per_second)  # Extract at 12 fps (candidates_per_second)
+                fps=float(self.frame_processing.candidates_per_second)  # Extract at candidates_per_second fps
             )
             if not all_high_frames or not all_low_frames:
                 raise Exception(f"Failed to extract frames (got {len(all_high_frames)} high and {len(all_low_frames)} low frames)")

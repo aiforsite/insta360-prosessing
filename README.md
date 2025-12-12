@@ -64,6 +64,7 @@ Edit `config.json` to configure processing parameters:
   "frames_per_second": 12,
   "low_res_frames_per_second": 1,
   "candidates_per_second": 12,
+  "stella_fps": 12,
   "route_calculation_fps": {
     "min": 1,
     "max": 4

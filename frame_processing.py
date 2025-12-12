@@ -1014,7 +1014,7 @@ class FrameProcessing:
     
     def create_stella_frames(self, stitched_path: Path, update_status_callback) -> List[Path]:
         """
-        Create 12fps frames for Stella VSLAM route calculation.
+        Create frames for Stella VSLAM route calculation.
         These are separate from the selected frames used for API storage.
         
         Args:
@@ -1024,13 +1024,13 @@ class FrameProcessing:
         Returns:
             List of frame paths for Stella
         """
-        update_status_callback("Creating 12fps frames for Stella route calculation...")
+        update_status_callback(f"Creating {self.candidates_per_second}fps frames for Stella route calculation...")
         
         stella_dir = self.work_dir / "stella_frames"
         stella_dir.mkdir(parents=True, exist_ok=True)
         
-        # Extract 12fps frames at low resolution (3840x1920) for Stella
-        # Use candidates_per_second (12) for frame rate
+        # Extract frames at low resolution (3840x1920) for Stella
+        # Use candidates_per_second for frame rate
         stella_pattern = str(stella_dir / "stella_%06d.jpg")
         stella_cmd = [
             'ffmpeg',
@@ -1062,13 +1062,13 @@ class FrameProcessing:
             return []
     
     def get_route_frames_from_low_res(self, low_frames: List[Path], update_status_callback) -> List[Path]:
-        """Use 12fps low res frames for route calculation."""
+        """Use low-res frames for route calculation."""
         logger.info(f"Using {len(low_frames)} low res frames for route calculation...")
         update_status_callback(f"Using {len(low_frames)} low res frames for route calculation...")
         return low_frames
     
     def select_frames_from_extracted(self, all_high_frames: List[Path], all_low_frames: List[Path], update_status_callback) -> Tuple[List[Path], List[Path]]:
-        """Select best frames (1 fps) from already extracted frames (12 fps).
+        """Select best frames (1 fps) from already extracted frames (candidates_per_second fps).
         
         Args:
             all_high_frames: All high-res frames extracted at candidates_per_second fps

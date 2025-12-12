@@ -1190,15 +1190,9 @@ class APIClient:
         
         # Get file UUIDs from videos (videos have a 'file' field that references the File object)
         # The 'file' field can be a UUID string or a dict with 'uuid' key
-        front_file_uuid = front_video.get('file')
-        back_file_uuid = back_video.get('file')
-        
-        # Handle case where 'file' is a dict
-        if isinstance(front_file_uuid, dict):
-            front_file_uuid = front_file_uuid.get('uuid')
-        if isinstance(back_file_uuid, dict):
-            back_file_uuid = back_file_uuid.get('uuid')
-        
+        front_file_uuid = front_video.get('uuid')
+        back_file_uuid = back_video.get('uuid')
+                
         if not front_file_uuid or not back_file_uuid:
             logger.warning(f"Missing file UUIDs in front or back video data. Front: {front_file_uuid}, Back: {back_file_uuid}")
             logger.debug(f"Front video data: {front_video}")

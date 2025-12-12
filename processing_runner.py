@@ -310,20 +310,18 @@ class VideoProcessor:
                     logger.warning("Could not determine video duration, defaulting to 10 minutes")
                     video_duration = 600.0  # 10 minutes
             
-            # Step 6: Extract frames from stitched video using FFmpeg (once at candidates_per_second fps)
-            # Extract frames at candidates_per_second fps (12 fps) - these will be used for both:
-            # 1. Frame selection (1 fps for API) - select best from each second
-            # 2. Stella route calculation (10 fps) - use all frames at 10 fps (subset of 12 fps)
-            high_dir = self.work_dir / "high_frames"
+            # Step 6: Extract low-res frames from stitched video using FFmpeg (once at candidates_per_second fps)
+            # These low-res frames are used for:
+            # - Stella route calculation (after filtering to stella_fps)
+            # - Sharpness-based 1fps selection (compute metric from low-res; extract high-res only for selected)
             low_dir = self.work_dir / "low_frames"
-            all_high_frames, all_low_frames = self.frame_processing.extract_frames_high_and_low(
+            all_low_frames = self.frame_processing.extract_frames_low_only(
                 stitched_path,
-                high_dir,
                 low_dir,
                 fps=float(self.frame_processing.candidates_per_second)  # Extract at candidates_per_second fps
             )
-            if not all_high_frames or not all_low_frames:
-                raise Exception(f"Failed to extract frames (got {len(all_high_frames)} high and {len(all_low_frames)} low frames)")
+            if not all_low_frames:
+                raise Exception(f"Failed to extract low-res frames (got {len(all_low_frames)} low frames)")
             
             # Step 7: Prepare frames for Stella route calculation FIRST
             # (before select_frames_from_extracted moves frames to selected_frames directory)
@@ -352,7 +350,7 @@ class VideoProcessor:
             # Step 8: Select best frames (1 fps) from extracted frames for API storage
             # This moves frames to selected_frames directory, so must be called after Stella preparation
             selected_high, selected_low = self.frame_processing.select_frames_from_extracted(
-                all_high_frames,
+                stitched_path,
                 all_low_frames,
                 self.update_status_text
             )

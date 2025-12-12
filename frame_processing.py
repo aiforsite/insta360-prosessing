@@ -168,6 +168,122 @@ class FrameProcessing:
         except Exception as e:
             logger.error(f"Frame extraction failed: {e}", exc_info=True)
             return [], []
+
+    def extract_frames_low_only(self, video_path: Path, low_dir: Path, fps: float) -> List[Path]:
+        """Extract low-resolution frames at given FPS.
+
+        This is used for:
+        - Stella route calculation (low-res frames)
+        - Sharpness-based selection (compute metric from low-res to avoid extracting all high-res)
+        """
+        logger.info(f"Extracting {fps} FPS frames (low res) from {video_path}...")
+
+        if not video_path.exists():
+            logger.error(f"Video file does not exist: {video_path}")
+            return []
+
+        if video_path.stat().st_size == 0:
+            logger.error(f"Video file is empty: {video_path}")
+            return []
+
+        low_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            low_pattern = str(low_dir / "low_%06d.jpg")
+            low_cmd = [
+                'ffmpeg',
+                '-i', str(video_path),
+                '-vf', f'fps={fps}/1:round=up',
+                '-s', '3840x1920',
+                '-q:v', '0',
+                '-start_number', '0',
+                low_pattern
+            ]
+
+            subprocess.run(low_cmd, check=True, capture_output=True, text=True)
+            low_frames = sorted(low_dir.glob("low_*.jpg"))
+            logger.info(f"Extracted {len(low_frames)} low res frames")
+            return low_frames
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Low-res frame extraction failed with exit code {e.returncode}")
+            if e.stdout:
+                logger.error(f"stdout: {e.stdout}")
+            if e.stderr:
+                logger.error(f"stderr: {e.stderr}")
+            return []
+        except Exception as e:
+            logger.error(f"Low-res frame extraction failed: {e}", exc_info=True)
+            return []
+
+    def _extract_selected_high_frames(
+        self,
+        video_path: Path,
+        selected_suffixes: List[int],
+        fps: float,
+        output_dir: Path
+    ) -> List[Path]:
+        """Extract ONLY selected high-res frames from the video.
+
+        Implementation:
+        - Use a single ffmpeg pass with `fps=...` then `select=...` over the filtered stream index `n`.
+        - Output frames sequentially, then rename them to match selected suffix indices.
+        """
+        if not selected_suffixes:
+            return []
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Build select expression over filtered stream indices (n after fps filter)
+        # IMPORTANT: escape comma in eq(n\,X) because filter args are comma-separated
+        expr_terms = [f"eq(n\\,{i})" for i in selected_suffixes]
+        select_expr = "+".join(expr_terms)
+        vf = f"fps={fps}/1:round=up,select='{select_expr}'"
+
+        tmp_pattern = str(output_dir / "high_sel_%06d.jpg")
+        cmd = [
+            'ffmpeg',
+            '-i', str(video_path),
+            '-vf', vf,
+            '-vsync', '0',
+            '-q:v', '0',
+            '-start_number', '0',
+            tmp_pattern
+        ]
+
+        logger.info(f"Extracting {len(selected_suffixes)} selected high-res frames using ffmpeg select...")
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+        tmp_frames = sorted(output_dir.glob("high_sel_*.jpg"))
+        if len(tmp_frames) != len(selected_suffixes):
+            logger.warning(
+                f"Selected high-res extraction count mismatch: expected {len(selected_suffixes)}, got {len(tmp_frames)}"
+            )
+
+        # Rename sequential outputs to match the original suffix numbering
+        final_high: List[Path] = []
+        for idx, tmp in enumerate(tmp_frames):
+            if idx >= len(selected_suffixes):
+                break
+            suffix = selected_suffixes[idx]
+            final_path = output_dir / f"high_{suffix:06d}.jpg"
+            try:
+                if final_path.exists():
+                    final_path.unlink()
+                shutil.move(str(tmp), str(final_path))
+                final_high.append(final_path)
+            except Exception as e:
+                logger.warning(f"Failed to rename selected high frame {tmp} -> {final_path}: {e}")
+
+        # Best-effort cleanup of any leftovers
+        for leftover in output_dir.glob("high_sel_*.jpg"):
+            try:
+                leftover.unlink()
+            except Exception:
+                pass
+
+        final_high.sort(key=lambda p: int(p.stem.split("_")[-1]))
+        return final_high
     
     def _select_best_frames_by_sharpness(self, high_frames: List[Path], candidates_per_second: int) -> set[int]:
         """Select best frames based on sharpness from each group of candidates_per_second frames.
@@ -1071,110 +1187,82 @@ class FrameProcessing:
         update_status_callback(f"Using {len(low_frames)} low res frames for route calculation...")
         return low_frames
     
-    def select_frames_from_extracted(self, all_high_frames: List[Path], all_low_frames: List[Path], update_status_callback) -> Tuple[List[Path], List[Path]]:
-        """Select best frames (1 fps) from already extracted frames (candidates_per_second fps).
-        
-        Args:
-            all_high_frames: All high-res frames extracted at candidates_per_second fps
-            all_low_frames: All low-res frames extracted at candidates_per_second fps
-            update_status_callback: Status update callback
-        
-        Returns:
-            Tuple of (selected_high, selected_low) - best frames for API storage (1 fps)
+    def select_frames_from_extracted(self, video_path: Path, all_low_frames: List[Path], update_status_callback) -> Tuple[List[Path], List[Path]]:
+        """Select best frames (1 fps) from already extracted low-res frames.
+
+        Optimization:
+        - Compute sharpness from low-res frames (fast)
+        - Extract high-res frames ONLY for the selected suffixes (avoid extracting all high-res)
         """
         update_status_callback("Selecting sharpest frames from each second...")
-        
-        # Select best frames based on sharpness (one per second)
-        selected_suffixes = self._select_best_frames_by_sharpness(all_high_frames, self.candidates_per_second)
-        
-        # Filter frames to only selected ones
-        def get_frame_suffix(frame_path: Path) -> Optional[int]:
-            """Extract frame suffix number from filename."""
-            try:
-                stem = frame_path.stem
-                if '_' in stem:
-                    return int(stem.split("_")[-1])
-                else:
-                    # Try to extract number from end
-                    match = re.search(r'(\d+)$', stem)
-                    if match:
-                        return int(match.group(1))
-                return None
-            except (ValueError, IndexError) as e:
-                logger.warning(f"Could not extract frame suffix from {frame_path.name}: {e}")
-                return None
-        
-        selected_high = []
-        selected_low = []
-        
-        for frame in all_high_frames:
-            suffix = get_frame_suffix(frame)
-            if suffix is not None and suffix in selected_suffixes:
-                selected_high.append(frame)
-        
-        for frame in all_low_frames:
-            suffix = get_frame_suffix(frame)
-            if suffix is not None and suffix in selected_suffixes:
-                selected_low.append(frame)
-        
-        logger.info(f"Filtered to {len(selected_high)} high and {len(selected_low)} low frames from {len(selected_suffixes)} selected suffixes")
-        if len(selected_high) != len(selected_suffixes) or len(selected_low) != len(selected_suffixes):
-            logger.warning(f"Mismatch: selected_suffixes={len(selected_suffixes)}, selected_high={len(selected_high)}, selected_low={len(selected_low)}")
-            # Log some examples of selected_suffixes and what we found
-            sample_suffixes = sorted(list(selected_suffixes))[:10]
-            logger.warning(f"Sample selected_suffixes (first 10): {sample_suffixes}")
-            # Check what frame suffixes we actually have
-            high_suffixes = sorted([get_frame_suffix(f) for f in all_high_frames if get_frame_suffix(f) is not None])[:20]
-            low_suffixes = sorted([get_frame_suffix(f) for f in all_low_frames if get_frame_suffix(f) is not None])[:20]
-            logger.warning(f"Sample high frame suffixes (first 20): {high_suffixes}")
-            logger.warning(f"Sample low frame suffixes (first 20): {low_suffixes}")
-            # Check if selected_suffixes are in the frame lists
-            missing_high = [s for s in sample_suffixes if s not in high_suffixes]
-            missing_low = [s for s in sample_suffixes if s not in low_suffixes]
-            if missing_high:
-                logger.warning(f"Selected suffixes not found in high frames: {missing_high}")
-            if missing_low:
-                logger.warning(f"Selected suffixes not found in low frames: {missing_low}")
-        
-        # Move selected frames to selected directory
+
+        # Select best frames based on sharpness (one per second) using LOW frames
+        selected_suffixes_set = self._select_best_frames_by_sharpness(all_low_frames, self.candidates_per_second)
+        selected_suffixes = sorted(list(selected_suffixes_set))
+
+        if not selected_suffixes:
+            logger.warning("No frames selected (sharpness selection returned empty set)")
+            return [], []
+
+        # Prepare selected directory
         selected_dir = self.work_dir / "selected_frames"
         selected_dir.mkdir(parents=True, exist_ok=True)
-        
-        final_high = []
-        final_low = []
-        
-        # Sort selected frames by suffix to ensure correct pairing
-        selected_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
-        selected_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
-        
-        # Move frames in parallel
-        def move_frame_pair(high_frame: Path, low_frame: Path) -> Tuple[Path, Path]:
-            """Move a pair of frames to selected directory."""
-            suffix = high_frame.stem.split("_")[-1]
-            new_high = selected_dir / f"high_{suffix}.jpg"
-            new_low = selected_dir / f"low_{suffix}.jpg"
-            
-            shutil.move(str(high_frame), str(new_high))
-            shutil.move(str(low_frame), str(new_low))
-            
-            return new_high, new_low
-        
-        logger.debug(f"Moving {len(selected_high)} selected frame pairs...")
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_pair = {
-                executor.submit(move_frame_pair, high, low): (high, low)
-                for high, low in zip(selected_high, selected_low)
-            }
-            
-            for future in as_completed(future_to_pair):
-                new_high, new_low = future.result()
-                final_high.append(new_high)
-                final_low.append(new_low)
-        
-        # Sort final lists by suffix
-        final_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
-        final_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
-        
+
+        # Copy selected LOW frames to selected directory with original suffix numbering
+        suffix_to_low: Dict[int, Path] = {}
+        for p in all_low_frames:
+            try:
+                suffix = int(p.stem.split("_")[-1])
+                suffix_to_low[suffix] = p
+            except Exception:
+                continue
+
+        final_low: List[Path] = []
+        for suffix in selected_suffixes:
+            src = suffix_to_low.get(suffix)
+            if not src or not src.exists():
+                logger.warning(f"Selected low frame missing for suffix {suffix}")
+                continue
+            dst = selected_dir / f"low_{suffix:06d}.jpg"
+            try:
+                if dst.exists():
+                    dst.unlink()
+                shutil.copy2(str(src), str(dst))
+                final_low.append(dst)
+            except Exception as e:
+                logger.warning(f"Failed to copy selected low frame {src} -> {dst}: {e}")
+
+        # Extract HIGH frames only for selected suffixes
+        try:
+            final_high = self._extract_selected_high_frames(
+                video_path=video_path,
+                selected_suffixes=selected_suffixes,
+                fps=float(self.candidates_per_second),
+                output_dir=selected_dir
+            )
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Selected high-res extraction failed with exit code {e.returncode}")
+            if e.stdout:
+                logger.error(f"stdout: {e.stdout}")
+            if e.stderr:
+                logger.error(f"stderr: {e.stderr}")
+            final_high = []
+        except Exception as e:
+            logger.error(f"Selected high-res extraction failed: {e}", exc_info=True)
+            final_high = []
+
+        # Optional cleanup: delete low-res candidates to save space (stella_frames are already copied)
+        for low_path in (self.work_dir / "low_frames").glob("low_*.jpg"):
+            try:
+                suffix = int(low_path.stem.split("_")[-1])
+                if suffix not in selected_suffixes_set:
+                    low_path.unlink()
+            except Exception:
+                pass
+
+        final_high.sort(key=lambda p: int(p.stem.split("_")[-1]))
+        final_low.sort(key=lambda p: int(p.stem.split("_")[-1]))
+
         update_status_callback(f"Selected {len(final_high)} best frames (1 fps)")
         return final_high, final_low
     

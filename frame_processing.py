@@ -870,6 +870,9 @@ class FrameProcessing:
         # Upload images in parallel
         completed = 0
         failed_uploads = []
+        total_tasks = len(upload_tasks)
+        # Status updates: only "started" and "finished" (no progress spam).
+        update_status_callback(f"Uploading images started ({total_tasks} files)...")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_task = {
                 executor.submit(upload_image_binary, url, path): (url, path)
@@ -884,9 +887,6 @@ class FrameProcessing:
                         completed += 1
                     else:
                         failed_uploads.append((url, path))
-                    
-                    if completed % 10 == 0 or completed == len(upload_tasks):
-                        update_status_callback(f"Uploading images: {completed}/{len(upload_tasks)}")
                 except Exception as e:
                     logger.error(f"Error uploading image {path}: {e}")
                     failed_uploads.append((url, path))
@@ -895,6 +895,10 @@ class FrameProcessing:
             logger.warning(f"Failed to upload {len(failed_uploads)} images")
         
         logger.info(f"Uploaded {completed}/{len(upload_tasks)} image binaries")
+        if failed_uploads:
+            update_status_callback(f"Uploading images finished ({completed}/{total_tasks}, failed {len(failed_uploads)})")
+        else:
+            update_status_callback(f"Uploading images finished ({completed}/{total_tasks})")
         
         # Return frame objects (for compatibility)
         frame_objects = []

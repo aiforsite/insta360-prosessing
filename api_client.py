@@ -613,6 +613,92 @@ class APIClient:
         
         logger.warning(f"Unexpected response format from bulk video frame endpoint: {type(response)}")
         return None
+    
+    def batch_create_video_frames(self, video_id: str, times_in_video: List[float], layer_id: str, blur_people: bool = False) -> Optional[List[Dict]]:
+        """Create video frames and images using batch-create endpoint.
+        
+        Args:
+            video_id: Video UUID
+            times_in_video: List of times in video (seconds)
+            layer_id: Layer UUID
+            blur_people: Whether to create blur image slots
+        
+        Returns:
+            List of frame dicts with frame uuid, image uuid+url, high_image uuid+url, etc.
+        """
+        if not times_in_video:
+            return []
+        
+        logger.info(f"Creating {len(times_in_video)} video frames using batch-create endpoint...")
+        
+        # Convert times to comma-separated string
+        times_str = ",".join([str(int(t)) for t in times_in_video])
+        
+        # Prepare form data
+        form_data = {
+            'video': video_id,
+            'times_in_video': times_str,
+            'layer': layer_id,
+            'blur_people': 'true' if blur_people else 'false'
+        }
+        
+        response = self._api_request(
+            'POST',
+            '/api/v1/video-frame/batch-create/',
+            data=form_data
+        )
+        
+        if response is None:
+            logger.error("Batch-create video frames request failed")
+            return None
+        
+        frames = response.get('frames', [])
+        if frames:
+            logger.info(f"Created {len(frames)} video frames with batch-create")
+        return frames
+    
+    def batch_update_video_frames(self, frames_data: List[Dict]) -> bool:
+        """Update video frames using batch-update endpoint.
+        
+        Args:
+            frames_data: List of frame update dicts, each containing:
+                - frame: frame uuid
+                - image/high_image/blur_image/blur_high_image: {uuid, register: true/false}
+                - camera_layer_position: {rx, ry}
+                - hotspots: (optional)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not frames_data:
+            return True
+        
+        logger.info(f"Updating {len(frames_data)} video frames using batch-update endpoint...")
+        
+        # Prepare form data with JSON-encoded frames_data
+        import json as json_module
+        form_data = {
+            'frames_data': json_module.dumps(frames_data)
+        }
+        
+        response = self._api_request(
+            'POST',
+            '/api/v1/video-frame/batch-update/',
+            data=form_data
+        )
+        
+        if response is None:
+            logger.error("Batch-update video frames request failed")
+            return False
+        
+        status = response.get('status')
+        if status == 'updated':
+            logger.info(f"Updated {len(frames_data)} video frames with batch-update")
+            return True
+        
+        error = response.get('error', 'Unknown error')
+        logger.error(f"Batch-update failed: {error}")
+        return False
 
     def fetch_video_frames(self, video_id: str, limit: int = 200) -> List[Dict]:
         """Fetch all video-frame records for a given video."""
@@ -895,9 +981,10 @@ class APIClient:
                 # Use time-based matching instead
                 logger.info("Using time-based matching for frames")
             
-            logger.info(f"Updating {len(frames)} video frames with camera positions from raw_path...")
+            logger.info(f"Updating {len(frames)} video frames with camera positions from raw_path using batch-update...")
             
-            updated_count = 0
+            # Prepare batch-update data
+            update_data = []
             failed_count = 0
             
             for idx, frame in enumerate(frames):
@@ -937,37 +1024,47 @@ class APIClient:
                         failed_count += 1
                         continue
                     
-                    # Update frame with retry logic for 502 errors
-                    success = False
-                    max_retries = 3
-                    for retry_attempt in range(max_retries):
-                        if self.update_video_frame_camera_position(frame_id, rx, ry, layer_id):
-                            updated_count += 1
-                            success = True
-                            break
-                        else:
-                            # Check if it's a 502 error (handled in _api_request, but add extra delay)
-                            if retry_attempt < max_retries - 1:
-                                # Exponential backoff for 502 errors: 2s, 4s, 8s
-                                delay = 2 ** (retry_attempt + 1)
-                                logger.debug(f"Retrying frame {frame_id} update in {delay}s (attempt {retry_attempt + 2}/{max_retries})...")
-                                time.sleep(delay)
-                    
-                    if not success:
-                        failed_count += 1
-                    
-                    # No delay between frame updates - API should handle concurrent requests
+                    # Prepare batch-update entry
+                    update_data.append({
+                        'frame': frame_id,
+                        'camera_layer_position': {
+                            'rx': rx,
+                            'ry': ry,
+                            'layer': layer_id
+                        }
+                    })
                         
                 except (ValueError, IndexError, TypeError) as e:
                     logger.warning(f"Failed to process frame {frame.get('uuid')}: {e}")
                     failed_count += 1
                     continue
             
-            logger.info(f"Updated {updated_count}/{len(frames)} video frames with camera positions ({failed_count} failed)")
-            if update_status_callback:
-                update_status_callback(f"Updated {updated_count} video frames with camera positions")
-            
-            return updated_count
+            # Update all frames using batch-update
+            if update_data:
+                logger.info(f"Updating {len(update_data)} video frames with batch-update...")
+                success = self.batch_update_video_frames(update_data)
+                if success:
+                    updated_count = len(update_data)
+                    logger.info(f"Updated {updated_count}/{len(frames)} video frames with camera positions ({failed_count} failed)")
+                    if update_status_callback:
+                        update_status_callback(f"Updated {updated_count} video frames with camera positions")
+                    return updated_count
+                else:
+                    logger.error("Batch-update failed, falling back to individual updates")
+                    # Fallback to individual updates
+                    updated_count = 0
+                    for update_entry in update_data:
+                        frame_id = update_entry['frame']
+                        camera_pos = update_entry['camera_layer_position']
+                        if self.update_video_frame_camera_position(frame_id, camera_pos['rx'], camera_pos['ry'], layer_id):
+                            updated_count += 1
+                    logger.info(f"Updated {updated_count}/{len(frames)} video frames with camera positions (fallback, {failed_count} failed)")
+                    if update_status_callback:
+                        update_status_callback(f"Updated {updated_count} video frames with camera positions")
+                    return updated_count
+            else:
+                logger.warning("No frames to update")
+                return 0
         except Exception as e:
             logger.error(f"Error in update_video_frames_from_raw_path: {e}", exc_info=True)
             raise

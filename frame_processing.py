@@ -1111,7 +1111,36 @@ class FrameProcessing:
             return []
         
         # Sort frames by frame number
-        sorted_frames = sorted(all_low_frames, key=lambda f: int(f.stem.split("_")[-1]))
+        def get_frame_number(frame_path: Path) -> int:
+            """Extract frame number from filename."""
+            try:
+                # Try to extract number from filename (e.g., "low_000123.jpg" -> 123)
+                stem = frame_path.stem
+                if '_' in stem:
+                    return int(stem.split("_")[-1])
+                else:
+                    # If no underscore, try to extract number from end
+                    match = re.search(r'(\d+)$', stem)
+                    if match:
+                        return int(match.group(1))
+                    else:
+                        logger.warning(f"Could not extract frame number from {frame_path.name}, using 0")
+                        return 0
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Error extracting frame number from {frame_path.name}: {e}, using 0")
+                return 0
+        
+        # Filter out non-existent frames and sort
+        existing_frames = [f for f in all_low_frames if f.exists()]
+        if len(existing_frames) != len(all_low_frames):
+            missing = len(all_low_frames) - len(existing_frames)
+            logger.warning(f"{missing} frames are missing, using {len(existing_frames)} existing frames")
+        
+        if not existing_frames:
+            logger.error("No existing frames found for Stella preparation")
+            return []
+        
+        sorted_frames = sorted(existing_frames, key=get_frame_number)
         
         # Filter frames to target FPS
         filtered_frames = []
@@ -1130,15 +1159,23 @@ class FrameProcessing:
                 # Take first frames_to_take frames from each group
                 filtered_frames.extend(group[:frames_to_take])
         
-        # Move frames to Stella directory with sequential naming
+        # Copy frames to Stella directory with sequential naming
         stella_dir = self.work_dir / "stella_frames"
         stella_dir.mkdir(parents=True, exist_ok=True)
         
         stella_frames = []
         for idx, frame in enumerate(filtered_frames):
-            stella_frame_path = stella_dir / f"stella_{idx:06d}.jpg"
-            shutil.copy2(str(frame), str(stella_frame_path))
-            stella_frames.append(stella_frame_path)
+            try:
+                if not frame.exists():
+                    logger.warning(f"Frame {frame} does not exist, skipping")
+                    continue
+                
+                stella_frame_path = stella_dir / f"stella_{idx:06d}.jpg"
+                shutil.copy2(str(frame), str(stella_frame_path))
+                stella_frames.append(stella_frame_path)
+            except Exception as e:
+                logger.error(f"Failed to copy frame {frame} to {stella_frame_path}: {e}")
+                continue
         
         logger.info(f"Prepared {len(stella_frames)} frames for Stella (from {len(all_low_frames)} frames at {source_fps} fps -> {target_fps} fps)")
         return stella_frames

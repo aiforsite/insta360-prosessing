@@ -312,16 +312,8 @@ class VideoProcessor:
             if not all_high_frames or not all_low_frames:
                 raise Exception(f"Failed to extract frames (got {len(all_high_frames)} high and {len(all_low_frames)} low frames)")
             
-            # Step 7: Select best frames (1 fps) from extracted frames for API storage
-            selected_high, selected_low = self.frame_processing.select_frames_from_extracted(
-                all_high_frames,
-                all_low_frames,
-                self.update_status_text
-            )
-            if not selected_high or not selected_low:
-                raise Exception(f"Failed to select frames (got {len(selected_high)} high and {len(selected_low)} low frames)")
-            
-            # Step 8: Prepare frames for Stella route calculation
+            # Step 7: Prepare frames for Stella route calculation FIRST
+            # (before select_frames_from_extracted moves frames to selected_frames directory)
             # Use configured stella_fps (default 12 fps) to get smoother route tracking
             # Higher FPS helps Stella avoid rounding 90-degree turns
             stella_low_frames = self.frame_processing.prepare_stella_frames_from_extracted(
@@ -331,6 +323,16 @@ class VideoProcessor:
             )
             if not stella_low_frames:
                 raise Exception(f"Failed to prepare Stella frames (got {len(stella_low_frames)} low frames)")
+            
+            # Step 8: Select best frames (1 fps) from extracted frames for API storage
+            # This moves frames to selected_frames directory, so must be called after Stella preparation
+            selected_high, selected_low = self.frame_processing.select_frames_from_extracted(
+                all_high_frames,
+                all_low_frames,
+                self.update_status_text
+            )
+            if not selected_high or not selected_low:
+                raise Exception(f"Failed to select frames (got {len(selected_high)} high and {len(selected_low)} low frames)")
             
             # Step 8: Store stitched video to API
             stitched_video_id = None

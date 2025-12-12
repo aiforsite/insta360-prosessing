@@ -11,6 +11,7 @@ import psutil
 import os
 import sys
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
@@ -253,6 +254,11 @@ class VideoProcessor:
                 status='processing'
             )
         
+        # Run Stella route calculation in background as soon as stella frames are ready,
+        # and overlap it with downstream CPU/network work (frame selection + API upload).
+        stella_executor: Optional[ThreadPoolExecutor] = None
+        stella_route_future = None
+
         try:
             # Step 2: Clean directories
             self.clean_local_directories()
@@ -330,6 +336,18 @@ class VideoProcessor:
             )
             if not stella_low_frames:
                 raise Exception(f"Failed to prepare Stella frames (got {len(stella_low_frames)} low frames)")
+
+            # Start Stella route calculation immediately (background)
+            logger.info(
+                f"Starting Stella route calculation in background using {len(stella_low_frames)} frames ({self.stella_fps} fps)"
+            )
+            stella_executor = ThreadPoolExecutor(max_workers=1)
+            stella_route_future = stella_executor.submit(
+                self.route_calculation.calculate_route,
+                stella_low_frames,
+                stitched_path,
+                self.update_status_text,
+            )
             
             # Step 8: Select best frames (1 fps) from extracted frames for API storage
             # This moves frames to selected_frames directory, so must be called after Stella preparation
@@ -396,11 +414,21 @@ class VideoProcessor:
             logger.info(f"Using {len(route_frames)} frames ({self.stella_fps} fps) for Stella route calculation")
             
             # Step 12: Calculate route using Stella VSLAM (via WSL if configured)
-            route_data = self.route_calculation.calculate_route(
-                route_frames,
-                stitched_path,  # Use actual stitched video path
-                self.update_status_text
-            )
+            route_data = None
+            if stella_route_future is not None:
+                logger.info("Waiting for background Stella route calculation to finish...")
+                try:
+                    route_data = stella_route_future.result()
+                except Exception as e:
+                    logger.error(f"Background Stella route calculation failed: {e}")
+                    route_data = None
+            else:
+                # Fallback (should not normally happen): run synchronously
+                route_data = self.route_calculation.calculate_route(
+                    route_frames,
+                    stitched_path,  # Use actual stitched video path
+                    self.update_status_text
+                )
             if route_data:
                 raw_path = route_data.get('raw_path')
                 route_duration = route_data.get('duration')
@@ -507,9 +535,25 @@ class VideoProcessor:
                     self.api_client.current_video_recording_id,
                     status='failure'
                 )
-            
+
+            # If Stella is still running in background, wait for it to finish before cleanup
+            # to avoid deleting stella_frames/results while the process is reading/writing.
+            if stella_route_future is not None:
+                logger.warning("Waiting for background Stella route calculation to finish before cleanup...")
+                try:
+                    stella_route_future.result()
+                except Exception:
+                    pass
+
             self.clean_local_directories()
             return False
+        finally:
+            # Ensure executor is cleaned up (do not leave threads hanging across tasks)
+            if stella_executor is not None:
+                try:
+                    stella_executor.shutdown(wait=False)
+                except Exception:
+                    pass
     
     def run(self, reset: bool = False, test_mode: bool = False):
         """Main loop: poll for tasks and process them."""

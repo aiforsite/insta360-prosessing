@@ -848,8 +848,12 @@ class FrameProcessing:
         sorted_suffixes = sorted(frame_collections.keys())
         update_status_callback("Saving video frame objects...")
         
-        frame_entries: List[Dict] = []
+        # Status update only once at the start
         total = len(sorted_suffixes)
+        if total > 0:
+            update_status_callback(f"Preparing {total} video frames...")
+        
+        frame_entries: List[Dict] = []
         for idx, suffix in enumerate(sorted_suffixes):
             images = frame_collections[suffix]
             high_id = images.get('high') or images.get('blurred_high')
@@ -908,9 +912,6 @@ class FrameProcessing:
                 'blur_low_id': blur_low_id,
                 'payload': payload
             })
-            
-            if (idx + 1) % 5 == 0 or idx == total - 1:
-                update_status_callback(f"Preparing video frames: {idx + 1}/{total}")
         
         if not frame_entries:
             update_status_callback("No frames to save to API")

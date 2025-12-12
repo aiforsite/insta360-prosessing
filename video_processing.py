@@ -638,10 +638,10 @@ class VideoProcessing:
         video_duration: Optional[float] = None
     ) -> Optional[str]:
         """
-        Store stitched video to API.
+        Create video object in API without uploading binary.
         
         Args:
-            stitched_path: Path to stitched video file (H265 MP4)
+            stitched_path: Optional path to stitched video (not uploaded, kept for reference)
             project_id: Project UUID
             video_recording: Video recording dict
             api_client: API client instance
@@ -652,33 +652,24 @@ class VideoProcessing:
             Video UUID if successful, None otherwise
         """
         try:
-            if not stitched_path or not stitched_path.exists():
-                logger.error(f"Stitched video file not found: {stitched_path}")
-                return None
-            
-            video_name = stitched_path.name
+            video_name = stitched_path.name if stitched_path and stitched_path.exists() else 'stitched_video.mp4'
             video_recording_id = video_recording.get('uuid') if video_recording else api_client.current_video_recording_id
-            video_size = stitched_path.stat().st_size
             
-            # Read video binary
-            logger.info(f"Reading stitched video file: {stitched_path} ({video_size:,} bytes)")
-            with open(stitched_path, 'rb') as f:
-                video_binary = f.read()
-            
-            # Store video with binary
+            # Create video object without uploading binary
+            # We'll use a minimal size (0) since we're not uploading the binary
             video_id = api_client.store_video(
                 project_id=project_id,
                 video_recording_id=video_recording_id,
                 video_type=video_type,
-                video_size=video_size,
-                video_binary=video_binary,
+                video_size=0,  # No binary to upload
+                video_binary=b'',  # Empty binary
                 name=video_name
             )
             if video_id:
-                logger.info(f"Stored processed video with ID {video_id} ({video_size:,} bytes uploaded)")
+                logger.info(f"Created processed video object with ID {video_id} (no binary uploaded)")
             return video_id
         except Exception as exc:
-            logger.error(f"Failed to store processed video: {exc}")
+            logger.error(f"Failed to create processed video object: {exc}")
             return None
     
     def select_fallback_video_id(

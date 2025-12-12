@@ -831,8 +831,14 @@ class APIClient:
                     cartesian_path.append([float(point[0]), float(point[1])])
             
             def get_rx_ry(pixel_coordinate: List[float], img_width: Optional[int] = None, img_height: Optional[int] = None) -> Tuple[float, float]:
-                """Return rx, ry values (may be outside 0.0-1.0 range to preserve route shape)."""
-                rx, ry = pixel_coordinate[0], pixel_coordinate[1]
+                """Return rx, ry values (may be outside 0.0-1.0 range to preserve route shape).
+                
+                Note: pixel_coordinate contains [x, z] from Stella, but we need to swap them:
+                - rx = z (horizontal position on layer)
+                - ry = x (vertical position on layer)
+                """
+                # Swap x and z coordinates: rx = z, ry = x
+                rx, ry = pixel_coordinate[1], pixel_coordinate[0]
                 # Don't clamp - allow values outside 0-1 range to preserve route shape
                 # Server should accept any float values
                 return float(rx), float(ry)

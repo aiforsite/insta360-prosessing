@@ -792,8 +792,11 @@ class FrameProcessing:
             return []
         
         # Calculate times_in_video for batch-create
+        # Framet on poimittu candidates_per_second fps:llä (12 fps) ja valittu 1 fps:llä (yksi per sekunti)
+        # Joten time_in_video lasketaan: suffix / candidates_per_second
+        # Esim. frame 0 -> 0/12 = 0.0s, frame 12 -> 12/12 = 1.0s, frame 24 -> 24/12 = 2.0s
         sorted_suffixes = sorted(frames_by_suffix.keys())
-        times_in_video = [suffix / float(self.source_fps) for suffix in sorted_suffixes]
+        times_in_video = [suffix / float(self.candidates_per_second) for suffix in sorted_suffixes]
         
         # Check if blur images exist
         blur_people = any(
@@ -1003,8 +1006,10 @@ class FrameProcessing:
                 logger.warning(f"Skipping suffix {suffix}: missing high/low images")
                 continue
             
-            # Calculate time_in_video based on source frame index and target FPS
-            time_in_video = suffix / float(self.source_fps)
+            # Calculate time_in_video based on frame index and candidates_per_second FPS
+            # Framet on poimittu candidates_per_second fps:llä (12 fps) ja valittu 1 fps:llä
+            # Joten time_in_video = suffix / candidates_per_second
+            time_in_video = suffix / float(self.candidates_per_second)
             times_in_video.append(time_in_video)
             suffix_to_images[suffix] = images
         

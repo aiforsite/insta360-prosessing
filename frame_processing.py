@@ -374,12 +374,26 @@ class FrameProcessing:
             logger.warning(f"Expected {total_seconds} selected frames (one per second) but got {len(selected_suffixes)}")
         return selected_suffixes
     
-    def _detect_people_boxes(self, image: Image.Image) -> List[Tuple[int, int, int, int]]:
-        """Run GPU-accelerated detection on low-res frame to find person bounding boxes."""
+    def _detect_people_boxes(
+        self,
+        image: Image.Image,
+        conf_threshold: Optional[float] = None,
+        min_box_area: Optional[float] = None
+    ) -> List[Tuple[int, int, int, int]]:
+        """Run GPU-accelerated detection on an image to find person bounding boxes.
+
+        Args:
+            image: PIL image to run detection on
+            conf_threshold: Optional override for confidence threshold (defaults to blur_settings)
+            min_box_area: Optional override for minimum box area (defaults to blur_settings)
+        """
         if not self._person_detector or not self._torch or not self._detector_transform:
             return []
         
         try:
+            effective_conf = float(conf_threshold) if conf_threshold is not None else self.blur_conf_threshold
+            effective_min_area = float(min_box_area) if min_box_area is not None else self.blur_min_box_area
+
             transformed = self._detector_transform(image).to(self._detector_device)
             with self._torch.inference_mode():
                 outputs = self._person_detector([transformed])[0]
@@ -390,12 +404,12 @@ class FrameProcessing:
             for box, score, label in zip(boxes, scores, labels):
                 if label.item() != 1:  # COCO class 1 = person
                     continue
-                if score.item() < self.blur_conf_threshold:
+                if score.item() < effective_conf:
                     continue
                 x1, y1, x2, y2 = box.tolist()
                 width = max(0.0, x2 - x1)
                 height = max(0.0, y2 - y1)
-                if width * height < self.blur_min_box_area:
+                if width * height < effective_min_area:
                     continue
                 detected.append((int(x1), int(y1), int(x2), int(y2)))
             return detected
@@ -417,7 +431,7 @@ class FrameProcessing:
                     img.paste(blurred, (x1, y1, x2, y2))
                 
                 blurred_path = image_path.parent / f"b_{image_path.name}"
-                img.save(blurred_path, quality=90)
+                img.save(blurred_path, quality=int(self.blur_settings.get('blur_output_quality', 90)))
                 return blurred_path
         except Exception as exc:
             logger.error(f"Failed to blur image {image_path}: {exc}")
@@ -430,7 +444,7 @@ class FrameProcessing:
                 img = img.convert("RGB")
                 blurred = img.filter(ImageFilter.GaussianBlur(radius=self.blur_radius))
                 blurred_path = image_path.parent / f"b_{image_path.name}"
-                blurred.save(blurred_path, quality=90)
+                blurred.save(blurred_path, quality=int(self.blur_settings.get('blur_output_quality', 90)))
                 return blurred_path
         except Exception as exc:
             logger.error(f"Failed to apply full blur to image {image_path}: {exc}")
@@ -794,6 +808,17 @@ class FrameProcessing:
         update_status_callback("Detecting people and applying blur...")
         
         detector_available = self._person_detector is not None
+        fallback_full_frame = bool(self.blur_settings.get('fallback_full_frame', True))
+        # New: when detector is available but finds no boxes, do NOT full-blur by default.
+        # This avoids "everything blurred" when a small person is missed by the detector.
+        fallback_full_frame_on_miss = bool(self.blur_settings.get('fallback_full_frame_on_miss', False))
+        blur_output_quality = int(self.blur_settings.get('blur_output_quality', 90))
+
+        # Optional: a second detection pass with more permissive thresholds to catch small persons.
+        # If not provided, this is disabled.
+        secondary_conf = self.blur_settings.get('secondary_confidence_threshold')
+        secondary_min_area = self.blur_settings.get('secondary_min_box_area')
+
         if not detector_available and not self.blur_settings.get('fallback_full_frame', True):
             logger.warning("Person detector unavailable and fallback disabled; returning original frames")
             return high_frames, low_frames
@@ -813,32 +838,46 @@ class FrameProcessing:
                         low_size = low_img.size
                         if detector_available:
                             boxes = self._detect_people_boxes(low_img)
+                            # Second pass (optional) if nothing detected
+                            if not boxes and (secondary_conf is not None or secondary_min_area is not None):
+                                boxes = self._detect_people_boxes(
+                                    low_img,
+                                    conf_threshold=secondary_conf,
+                                    min_box_area=secondary_min_area
+                                )
                 except Exception as exc:
                     logger.warning(f"Failed to process low frame {low_frame}: {exc}")
                 
+                # Decide whether we should full-blur when no detections:
+                # - If detector is unavailable: follow legacy fallback_full_frame
+                # - If detector is available but missed: only full-blur if fallback_full_frame_on_miss is enabled
+                allow_full_blur = (not detector_available and fallback_full_frame) or (detector_available and fallback_full_frame_on_miss)
+
                 if boxes:
                     blurred_low_path = self._apply_blur_to_boxes(low_frame, boxes) or low_frame
-                elif self.blur_settings.get('fallback_full_frame', True):
+                elif allow_full_blur:
                     blurred_low_path = self._apply_full_blur(low_frame) or low_frame
                 else:
                     blurred_low_path = low_frame
                 
-                try:
-                    with Image.open(high_frame) as high_img:
-                        high_img = high_img.convert("RGB")
-                        high_size = high_img.size
-                except Exception as exc:
-                    logger.warning(f"Failed to open high frame {high_frame}: {exc}")
-                
-                if boxes and low_size and high_size:
-                    scale_x = high_size[0] / low_size[0]
-                    scale_y = high_size[1] / low_size[1]
-                    scaled_boxes = self._scale_boxes(boxes, scale_x, scale_y)
-                    blurred_high_path = self._apply_blur_to_boxes(high_frame, scaled_boxes) or high_frame
-                elif self.blur_settings.get('fallback_full_frame', True):
-                    blurred_high_path = self._apply_full_blur(high_frame) or high_frame
-                else:
-                    blurred_high_path = high_frame
+                # Speed optimization: only open/process high frame if we will actually blur it
+                blurred_high_path = high_frame
+                if boxes or allow_full_blur:
+                    try:
+                        with Image.open(high_frame) as high_img:
+                            high_img = high_img.convert("RGB")
+                            high_size = high_img.size
+                    except Exception as exc:
+                        logger.warning(f"Failed to open high frame {high_frame}: {exc}")
+                        high_size = None
+
+                    if boxes and low_size and high_size:
+                        scale_x = high_size[0] / low_size[0]
+                        scale_y = high_size[1] / low_size[1]
+                        scaled_boxes = self._scale_boxes(boxes, scale_x, scale_y)
+                        blurred_high_path = self._apply_blur_to_boxes(high_frame, scaled_boxes) or high_frame
+                    elif allow_full_blur:
+                        blurred_high_path = self._apply_full_blur(high_frame) or high_frame
                 
                 blurred_high.append(blurred_high_path)
                 blurred_low.append(blurred_low_path)

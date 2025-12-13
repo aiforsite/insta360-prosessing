@@ -416,6 +416,57 @@ class FrameProcessing:
         except Exception as exc:
             logger.warning(f"GPU detection failed, falling back to no blur: {exc}")
             return []
+
+    def _detect_people_boxes_batch(
+        self,
+        images: List[Image.Image],
+        conf_threshold: Optional[float] = None,
+        min_box_area: Optional[float] = None
+    ) -> List[List[Tuple[int, int, int, int]]]:
+        """Run GPU-accelerated detection on a batch of images.
+
+        This is significantly faster than running one image at a time because it reduces
+        model invocation overhead and improves GPU utilization.
+        """
+        if not images:
+            return []
+        if not self._person_detector or not self._torch or not self._detector_transform:
+            return [[] for _ in images]
+
+        try:
+            effective_conf = float(conf_threshold) if conf_threshold is not None else self.blur_conf_threshold
+            effective_min_area = float(min_box_area) if min_box_area is not None else self.blur_min_box_area
+
+            tensors = [self._detector_transform(img).to(self._detector_device) for img in images]
+            with self._torch.inference_mode():
+                outputs_list = self._person_detector(tensors)
+
+            results: List[List[Tuple[int, int, int, int]]] = []
+            for outputs in outputs_list:
+                boxes = outputs.get('boxes', [])
+                scores = outputs.get('scores', [])
+                labels = outputs.get('labels', [])
+                detected: List[Tuple[int, int, int, int]] = []
+                for box, score, label in zip(boxes, scores, labels):
+                    if label.item() != 1:  # COCO class 1 = person
+                        continue
+                    if score.item() < effective_conf:
+                        continue
+                    x1, y1, x2, y2 = box.tolist()
+                    width = max(0.0, x2 - x1)
+                    height = max(0.0, y2 - y1)
+                    if width * height < effective_min_area:
+                        continue
+                    detected.append((int(x1), int(y1), int(x2), int(y2)))
+                results.append(detected)
+
+            # Safety: preserve length
+            if len(results) != len(images):
+                return results[:len(images)] + ([[]] * max(0, len(images) - len(results)))
+            return results
+        except Exception as exc:
+            logger.warning(f"GPU batch detection failed, falling back to no blur: {exc}")
+            return [[] for _ in images]
     
     def _apply_blur_to_boxes(self, image_path: Path, boxes: List[Tuple[int, int, int, int]]) -> Optional[Path]:
         """Blur only the specified bounding boxes inside an image."""
@@ -837,10 +888,13 @@ class FrameProcessing:
         secondary_conf = self.blur_settings.get('secondary_confidence_threshold')
         secondary_min_area = self.blur_settings.get('secondary_min_box_area')
 
-        # Speed optimization: run detection on a smaller image, then scale boxes back up.
-        # Default target is 1920x960 for equirectangular 2:1 low-res frames.
-        detector_target_width = int(self.blur_settings.get('detector_target_width', 1920))
-        detector_target_height = int(self.blur_settings.get('detector_target_height', 960))
+        # Detection source:
+        # Users zoom the HIGH-res stills in the frontend, so we detect on the high-res frames to avoid
+        # missing small persons that are not visible at lower resolutions.
+        detector_target_width = self.blur_settings.get('detector_target_width')
+        detector_target_height = self.blur_settings.get('detector_target_height')
+        detector_target_width = int(detector_target_width) if detector_target_width is not None else 0
+        detector_target_height = int(detector_target_height) if detector_target_height is not None else 0
 
         if not detector_available and not self.blur_settings.get('fallback_full_frame', True):
             logger.warning("Person detector unavailable and fallback disabled; returning original frames")
@@ -850,108 +904,130 @@ class FrameProcessing:
         blurred_low: List[Path] = []
         
         try:
+            # Decide whether we should full-blur when no detections:
+            # - If detector is unavailable: follow legacy fallback_full_frame
+            # - If detector is available but missed: only full-blur if fallback_full_frame_on_miss is enabled
+            allow_full_blur_default = (not detector_available and fallback_full_frame) or (detector_available and fallback_full_frame_on_miss)
+
+            # Batch detection setup (high-res detection is heavier; default smaller batch size)
+            batch_size = int(self.blur_settings.get('detector_batch_size', 2))
+            if batch_size < 1:
+                batch_size = 1
+
+            def process_batch(batch_items: List[Tuple[Path, Path, Image.Image, Tuple[int, int], Tuple[int, int], float, float, float, Optional[float]]]):
+                """Run detection for a batch (on high-res) and apply blur/copy outputs."""
+                if not batch_items:
+                    return
+
+                det_images = [item[2] for item in batch_items]
+                primary_min_area_det = batch_items[0][6]
+                secondary_min_area_det = batch_items[0][7]
+
+                boxes_det_list = self._detect_people_boxes_batch(det_images, min_box_area=primary_min_area_det)
+                if (secondary_conf is not None or secondary_min_area_det is not None):
+                    # Only run second pass for frames that had no detections in pass 1
+                    missing_indices = [i for i, b in enumerate(boxes_det_list) if not b]
+                    if missing_indices:
+                        det_images_2 = [det_images[i] for i in missing_indices]
+                        boxes_det_list_2 = self._detect_people_boxes_batch(
+                            det_images_2,
+                            conf_threshold=secondary_conf,
+                            min_box_area=secondary_min_area_det
+                        )
+                        for j, i in enumerate(missing_indices):
+                            boxes_det_list[i] = boxes_det_list_2[j] if j < len(boxes_det_list_2) else []
+
+                for (high_frame, low_frame, _det_img, low_size, high_size, scale_x, scale_y, _pmin, _smin), boxes_det in zip(batch_items, boxes_det_list):
+                    # boxes_det are in HIGH-res coordinates (detector runs on high-res)
+                    boxes_high = list(boxes_det)
+                    # Scale down to low-res coordinates for low image blur
+                    boxes_low = [
+                        (int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y))
+                        for (x1, y1, x2, y2) in boxes_high
+                    ]
+
+                    allow_full_blur = allow_full_blur_default
+
+                    if boxes_low:
+                        blurred_low_path = self._apply_blur_to_boxes(low_frame, boxes_low) or low_frame
+                    elif allow_full_blur:
+                        blurred_low_path = self._apply_full_blur(low_frame) or low_frame
+                    else:
+                        blurred_low_path = low_frame
+
+                    if blurred_low_path == low_frame:
+                        blurred_low_path = self._ensure_blur_variant(low_frame) or low_frame
+
+                    # High-res (users zoom this)
+                    blurred_high_path = high_frame
+                    if boxes_high or allow_full_blur:
+                        if boxes_high:
+                            blurred_high_path = self._apply_blur_to_boxes(high_frame, boxes_high) or high_frame
+                        elif allow_full_blur:
+                            blurred_high_path = self._apply_full_blur(high_frame) or high_frame
+                    else:
+                        blurred_high_path = self._ensure_blur_variant(high_frame) or high_frame
+
+                    if blurred_high_path == high_frame:
+                        blurred_high_path = self._ensure_blur_variant(high_frame) or high_frame
+
+                    blurred_high.append(blurred_high_path)
+                    blurred_low.append(blurred_low_path)
+
+            batch: List[Tuple[Path, Path, Image.Image, Tuple[int, int], Tuple[int, int], float, float, float, Optional[float]]] = []
+
             for high_frame, low_frame in zip(high_frames, low_frames):
-                boxes: List[Tuple[int, int, int, int]] = []
-                low_size = None
-                high_size = None
-                
                 try:
+                    # Load low-res size (for scaling boxes down) and high-res image (for detection)
                     with Image.open(low_frame) as low_img:
                         low_img = low_img.convert("RGB")
                         low_size = low_img.size
-                        if detector_available:
-                            # Run detection on downscaled image (e.g. 1920x960) for speed
-                            det_img = low_img
-                            det_w, det_h = low_img.size
-                            if detector_target_width > 0 and detector_target_height > 0 and (det_w != detector_target_width or det_h != detector_target_height):
-                                try:
-                                    det_img = low_img.resize((detector_target_width, detector_target_height), Image.Resampling.BILINEAR)
-                                    det_w, det_h = det_img.size
-                                except Exception:
-                                    # Fallback to original size if resize fails
-                                    det_img = low_img
-                                    det_w, det_h = low_img.size
 
-                            # Scale factors from detection-space -> original low frame space
-                            scale_x = (low_img.size[0] / float(det_w)) if det_w else 1.0
-                            scale_y = (low_img.size[1] / float(det_h)) if det_h else 1.0
+                    with Image.open(high_frame) as high_img:
+                        high_img = high_img.convert("RGB")
+                        high_size = high_img.size
 
-                            # Keep min_box_area semantics in ORIGINAL low-res pixel space.
-                            # Convert threshold to detector-space so you don't have to retune when resizing.
-                            area_scale = max(1e-6, scale_x * scale_y)
-                            primary_min_area_det = self.blur_min_box_area / area_scale
-                            secondary_min_area_det = None
-                            if secondary_min_area is not None:
-                                try:
-                                    secondary_min_area_det = float(secondary_min_area) / area_scale
-                                except Exception:
-                                    secondary_min_area_det = None
+                        det_img = high_img
+                        det_w, det_h = high_img.size
 
-                            boxes_det = self._detect_people_boxes(det_img, min_box_area=primary_min_area_det)
-                            # Second pass (optional) if nothing detected
-                            if not boxes_det and (secondary_conf is not None or secondary_min_area_det is not None):
-                                boxes_det = self._detect_people_boxes(
-                                    det_img,
-                                    conf_threshold=secondary_conf,
-                                    min_box_area=secondary_min_area_det
-                                )
+                        # If explicit target set, resize for speed (but default is full high-res for accuracy)
+                        if detector_target_width > 0 and detector_target_height > 0 and (det_w != detector_target_width or det_h != detector_target_height):
+                            try:
+                                det_img = high_img.resize((detector_target_width, detector_target_height), Image.Resampling.BILINEAR)
+                                det_w, det_h = det_img.size
+                            except Exception:
+                                det_img = high_img
+                                det_w, det_h = high_img.size
 
-                            # Scale boxes back up to low frame coordinates
-                            boxes = []
-                            for x1, y1, x2, y2 in boxes_det:
-                                boxes.append((
-                                    int(x1 * scale_x),
-                                    int(y1 * scale_y),
-                                    int(x2 * scale_x),
-                                    int(y2 * scale_y),
-                                ))
+                        # Scale factors from HIGH-res -> LOW-res coordinate space
+                        scale_x = (low_size[0] / float(det_w)) if det_w else 1.0
+                        scale_y = (low_size[1] / float(det_h)) if det_h else 1.0
+
+                        # Keep min_box_area semantics in ORIGINAL LOW-res pixel space.
+                        # Convert threshold to detector-space (high-res) so config doesn't need retuning.
+                        area_scale = max(1e-6, (float(det_w) / low_size[0]) * (float(det_h) / low_size[1]))
+                        primary_min_area_det = self.blur_min_box_area * area_scale
+                        secondary_min_area_det = None
+                        if secondary_min_area is not None:
+                            try:
+                                secondary_min_area_det = float(secondary_min_area) * area_scale
+                            except Exception:
+                                secondary_min_area_det = None
+
+                        batch.append((high_frame, low_frame, det_img, low_size, high_size, scale_x, scale_y, primary_min_area_det, secondary_min_area_det))
                 except Exception as exc:
                     logger.warning(f"Failed to process low frame {low_frame}: {exc}")
-                
-                # Decide whether we should full-blur when no detections:
-                # - If detector is unavailable: follow legacy fallback_full_frame
-                # - If detector is available but missed: only full-blur if fallback_full_frame_on_miss is enabled
-                allow_full_blur = (not detector_available and fallback_full_frame) or (detector_available and fallback_full_frame_on_miss)
+                    # Fallback: ensure blur variants exist via copy so upload requirements are met
+                    blurred_low.append(self._ensure_blur_variant(low_frame) or low_frame)
+                    blurred_high.append(self._ensure_blur_variant(high_frame) or high_frame)
+                    continue
 
-                if boxes:
-                    blurred_low_path = self._apply_blur_to_boxes(low_frame, boxes) or low_frame
-                elif allow_full_blur:
-                    blurred_low_path = self._apply_full_blur(low_frame) or low_frame
-                else:
-                    blurred_low_path = low_frame
+                if len(batch) >= batch_size:
+                    process_batch(batch)
+                    batch = []
 
-                # Ensure blur variant exists even when there is nothing to blur
-                if blurred_low_path == low_frame:
-                    blurred_low_path = self._ensure_blur_variant(low_frame) or low_frame
-                
-                # Speed optimization: only open/process high frame if we will actually blur it
-                blurred_high_path = high_frame
-                if boxes or allow_full_blur:
-                    try:
-                        with Image.open(high_frame) as high_img:
-                            high_img = high_img.convert("RGB")
-                            high_size = high_img.size
-                    except Exception as exc:
-                        logger.warning(f"Failed to open high frame {high_frame}: {exc}")
-                        high_size = None
-
-                    if boxes and low_size and high_size:
-                        scale_x = high_size[0] / low_size[0]
-                        scale_y = high_size[1] / low_size[1]
-                        scaled_boxes = self._scale_boxes(boxes, scale_x, scale_y)
-                        blurred_high_path = self._apply_blur_to_boxes(high_frame, scaled_boxes) or high_frame
-                    elif allow_full_blur:
-                        blurred_high_path = self._apply_full_blur(high_frame) or high_frame
-                else:
-                    # No boxes and no full-blur fallback; still ensure a blur-variant exists (copy)
-                    blurred_high_path = self._ensure_blur_variant(high_frame) or high_frame
-
-                # If we ended up not writing a new file (e.g., blur failed), ensure we still have a blur variant
-                if blurred_high_path == high_frame:
-                    blurred_high_path = self._ensure_blur_variant(high_frame) or high_frame
-                
-                blurred_high.append(blurred_high_path)
-                blurred_low.append(blurred_low_path)
+            if batch:
+                process_batch(batch)
             
             logger.info(f"Blurred {len(blurred_high)} frame pairs")
             update_status_callback(f"Blurred {len(blurred_high)} frames")

@@ -1,0 +1,14 @@
+#
+# Optional GPU dependencies (PyTorch + TorchVision) for blur person detection.
+#
+# NOTE: These wheels are very large (multi-GB). On Windows, pip downloads to %TEMP% / %TMP%.
+# If C: is low on space, set TMP/TEMP to a bigger drive before installing, e.g.:
+#   set TMP=D:\temp
+#   set TEMP=D:\temp
+#
+# CUDA wheel index (bundled CUDA runtime in the wheel):
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.1.2+cu121
+torchvision==0.16.2+cu121
+
+

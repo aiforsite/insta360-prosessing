@@ -449,6 +449,24 @@ class FrameProcessing:
         except Exception as exc:
             logger.error(f"Failed to apply full blur to image {image_path}: {exc}")
             return None
+
+    def _ensure_blur_variant(self, image_path: Path) -> Optional[Path]:
+        """Ensure a blur-variant file exists for the given image.
+
+        If no blur is needed (no boxes detected), frontend still expects blur image binaries to exist.
+        In that case we create a cheap copy with the `b_` prefix.
+        """
+        try:
+            if not image_path or not image_path.exists():
+                return None
+            blurred_path = image_path.parent / f"b_{image_path.name}"
+            if blurred_path.exists():
+                return blurred_path
+            shutil.copy2(str(image_path), str(blurred_path))
+            return blurred_path
+        except Exception as exc:
+            logger.warning(f"Failed to create blur-variant copy for {image_path}: {exc}")
+            return None
     
     def _scale_boxes(self, boxes: List[Tuple[int, int, int, int]], scale_x: float, scale_y: float) -> List[Tuple[int, int, int, int]]:
         """Scale bounding boxes according to provided multipliers."""
@@ -819,6 +837,11 @@ class FrameProcessing:
         secondary_conf = self.blur_settings.get('secondary_confidence_threshold')
         secondary_min_area = self.blur_settings.get('secondary_min_box_area')
 
+        # Speed optimization: run detection on a smaller image, then scale boxes back up.
+        # Default target is 1920x960 for equirectangular 2:1 low-res frames.
+        detector_target_width = int(self.blur_settings.get('detector_target_width', 1920))
+        detector_target_height = int(self.blur_settings.get('detector_target_height', 960))
+
         if not detector_available and not self.blur_settings.get('fallback_full_frame', True):
             logger.warning("Person detector unavailable and fallback disabled; returning original frames")
             return high_frames, low_frames
@@ -837,14 +860,51 @@ class FrameProcessing:
                         low_img = low_img.convert("RGB")
                         low_size = low_img.size
                         if detector_available:
-                            boxes = self._detect_people_boxes(low_img)
+                            # Run detection on downscaled image (e.g. 1920x960) for speed
+                            det_img = low_img
+                            det_w, det_h = low_img.size
+                            if detector_target_width > 0 and detector_target_height > 0 and (det_w != detector_target_width or det_h != detector_target_height):
+                                try:
+                                    det_img = low_img.resize((detector_target_width, detector_target_height), Image.Resampling.BILINEAR)
+                                    det_w, det_h = det_img.size
+                                except Exception:
+                                    # Fallback to original size if resize fails
+                                    det_img = low_img
+                                    det_w, det_h = low_img.size
+
+                            # Scale factors from detection-space -> original low frame space
+                            scale_x = (low_img.size[0] / float(det_w)) if det_w else 1.0
+                            scale_y = (low_img.size[1] / float(det_h)) if det_h else 1.0
+
+                            # Keep min_box_area semantics in ORIGINAL low-res pixel space.
+                            # Convert threshold to detector-space so you don't have to retune when resizing.
+                            area_scale = max(1e-6, scale_x * scale_y)
+                            primary_min_area_det = self.blur_min_box_area / area_scale
+                            secondary_min_area_det = None
+                            if secondary_min_area is not None:
+                                try:
+                                    secondary_min_area_det = float(secondary_min_area) / area_scale
+                                except Exception:
+                                    secondary_min_area_det = None
+
+                            boxes_det = self._detect_people_boxes(det_img, min_box_area=primary_min_area_det)
                             # Second pass (optional) if nothing detected
-                            if not boxes and (secondary_conf is not None or secondary_min_area is not None):
-                                boxes = self._detect_people_boxes(
-                                    low_img,
+                            if not boxes_det and (secondary_conf is not None or secondary_min_area_det is not None):
+                                boxes_det = self._detect_people_boxes(
+                                    det_img,
                                     conf_threshold=secondary_conf,
-                                    min_box_area=secondary_min_area
+                                    min_box_area=secondary_min_area_det
                                 )
+
+                            # Scale boxes back up to low frame coordinates
+                            boxes = []
+                            for x1, y1, x2, y2 in boxes_det:
+                                boxes.append((
+                                    int(x1 * scale_x),
+                                    int(y1 * scale_y),
+                                    int(x2 * scale_x),
+                                    int(y2 * scale_y),
+                                ))
                 except Exception as exc:
                     logger.warning(f"Failed to process low frame {low_frame}: {exc}")
                 
@@ -859,6 +919,10 @@ class FrameProcessing:
                     blurred_low_path = self._apply_full_blur(low_frame) or low_frame
                 else:
                     blurred_low_path = low_frame
+
+                # Ensure blur variant exists even when there is nothing to blur
+                if blurred_low_path == low_frame:
+                    blurred_low_path = self._ensure_blur_variant(low_frame) or low_frame
                 
                 # Speed optimization: only open/process high frame if we will actually blur it
                 blurred_high_path = high_frame
@@ -878,6 +942,13 @@ class FrameProcessing:
                         blurred_high_path = self._apply_blur_to_boxes(high_frame, scaled_boxes) or high_frame
                     elif allow_full_blur:
                         blurred_high_path = self._apply_full_blur(high_frame) or high_frame
+                else:
+                    # No boxes and no full-blur fallback; still ensure a blur-variant exists (copy)
+                    blurred_high_path = self._ensure_blur_variant(high_frame) or high_frame
+
+                # If we ended up not writing a new file (e.g., blur failed), ensure we still have a blur variant
+                if blurred_high_path == high_frame:
+                    blurred_high_path = self._ensure_blur_variant(high_frame) or high_frame
                 
                 blurred_high.append(blurred_high_path)
                 blurred_low.append(blurred_low_path)

@@ -59,7 +59,28 @@ class FrameProcessing:
             return
         
         try:
-            device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+            cuda_available = bool(getattr(torch, "cuda", None)) and torch.cuda.is_available()
+            device = torch.device("cuda") if cuda_available else torch.device("cpu")
+
+            # Make it very clear in logs whether GPU is actually in use.
+            # On Windows, a common gotcha is having CPU-only torch wheels installed.
+            torch_version = getattr(torch, "__version__", "unknown")
+            torch_cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
+            if not cuda_available:
+                logger.warning(
+                    "Person detector will run on CPU (CUDA not available). "
+                    f"torch={torch_version}, torch.version.cuda={torch_cuda_version}. "
+                    "If you expected GPU, install a CUDA-enabled PyTorch+TorchVision build."
+                )
+            else:
+                try:
+                    gpu_name = torch.cuda.get_device_name(0)
+                except Exception:
+                    gpu_name = "unknown"
+                logger.info(
+                    f"CUDA available for blur detector (torch={torch_version}, torch.version.cuda={torch_cuda_version}, gpu={gpu_name})"
+                )
+
             weights = FasterRCNN_ResNet50_FPN_Weights.DEFAULT
             model = fasterrcnn_resnet50_fpn(weights=weights)
             model.to(device)

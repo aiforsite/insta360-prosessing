@@ -75,7 +75,8 @@ Edit `config.json` to configure processing parameters:
     "confidence_threshold": 0.7,
     "min_box_area": 2500,
     "blur_radius": 18,
-    "fallback_full_frame": true
+    "fallback_full_frame": true,
+    "detector_batch_size": 2
   },
   "fallback_video_categories": [
     "video_insta360_raw_front",
@@ -91,6 +92,7 @@ Edit `config.json` to configure processing parameters:
 - `min_box_area`: Ignore detections smaller than this pixel area (filters out noise).
 - `blur_radius`: Gaussian blur radius applied to each bounding box.
 - `fallback_full_frame`: When `true`, fall back to full-frame blur if no people are detected or the detector is unavailable.
+- `detector_batch_size`: Batch size for person detection (higher = faster, but uses more GPU memory). Recommended: 2–8.
 - `test_task_uuid`: UUID of a process-recording-task used when running `processing_runner.py --test`.
 ```
 

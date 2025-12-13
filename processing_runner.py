@@ -663,7 +663,8 @@ class VideoProcessor:
                     else:
                         self.process_task(task)
                 else:
-                    logger.debug("No tasks available, waiting...")
+                    # Only one INFO line per poll cycle (avoid "Fetching..." + "No task found" pairs).
+                    logger.info(f"No task found (next poll in {self.polling_interval}s)")
 
                 if test_mode:
                     break

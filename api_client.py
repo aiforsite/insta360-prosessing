@@ -81,7 +81,8 @@ class MediaServerAPIClient:
 
     def fetch_next_task(self, reset: bool = False) -> Optional[Dict]:
         """Fetch next video_task from Media Server API."""
-        logger.info("Fetching next video task from Media Server API...")
+        # Keep polling noise out of INFO logs; the caller (processing_runner) logs one INFO line per poll.
+        logger.debug("Fetching next video task from Media Server API...")
         payload = {
             "task_type": "process_360_video", 
             "environment": "development", # production
@@ -91,10 +92,12 @@ class MediaServerAPIClient:
         endpoint = f"/api/tasks/fetch"
         task = self._api_request('POST', endpoint, json=payload)
         if task:
-            logger.info(f"Fetched task: {task}")
+            # Task payload can be large; avoid logging full token/details at INFO.
+            task_id = task.get('task_id') or task.get('uuid') or task.get('id')
+            logger.debug(f"Fetched task from Media Server API (task_id={task_id})")
             return task
         else:
-            logger.info("No task found")
+            logger.debug("No task found")
             return None
     
     def update_task_status(self, task_id: str, status: str, result: Optional[str] = None) -> bool:

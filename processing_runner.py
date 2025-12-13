@@ -261,9 +261,11 @@ class VideoProcessor:
 
         try:
             # Step 2: Clean directories
+            logger.info("Starting video processing task: Step 2: Cleaning local directories")
             self.clean_local_directories()
             
             # Step 3: Download videos
+            logger.info("Starting video processing task: Step 3: Downloading videos")
             video_recording_id = self.api_client.current_video_recording_id
             if not video_recording_id:
                 raise Exception("Missing video_recording_id in task")
@@ -292,6 +294,7 @@ class VideoProcessor:
                 self.blur_people = bool(video_recording.get('blur_people'))
             
             # Step 4: Stitch videos to H265 MP4 using MediaSDK
+            logger.info("Starting video processing task: Step 4: Stitching videos")
             stitched_path = self.work_dir / "stitched_video.mp4"
             if not self.video_processing.stitch_videos(
                 front_path,
@@ -302,6 +305,7 @@ class VideoProcessor:
                 raise Exception("Failed to stitch videos")
             
             # Step 5: Get video duration from stitched video
+            logger.info("Starting video processing task: Step 5: Getting video duration")
             video_duration = self.video_processing.get_video_duration(stitched_path)
             if not video_duration:
                 # Try to get from front video as fallback
@@ -311,6 +315,7 @@ class VideoProcessor:
                     video_duration = 600.0  # 10 minutes
             
             # Step 6: Extract low-res frames from stitched video using FFmpeg (once at candidates_per_second fps)
+            logger.info("Starting video processing task: Step 6: Extracting low-res frames")
             # These low-res frames are used for:
             # - Stella route calculation (after filtering to stella_fps)
             # - Sharpness-based 1fps selection (compute metric from low-res; extract high-res only for selected)
@@ -327,6 +332,7 @@ class VideoProcessor:
             # (before select_frames_from_extracted moves frames to selected_frames directory)
             # Use configured stella_fps (default 12 fps) to get smoother route tracking
             # Higher FPS helps Stella avoid rounding 90-degree turns
+            logger.info("Starting video processing task: Step 7: Preparing frames for Stella route calculation")
             stella_low_frames = self.frame_processing.prepare_stella_frames_from_extracted(
                 all_low_frames,
                 target_fps=float(self.stella_fps),
@@ -348,6 +354,7 @@ class VideoProcessor:
             )
             
             # Step 8: Select best frames (1 fps) from extracted frames for API storage
+            logger.info("Starting video processing task: Step 8: Starting Stella route calculation in background")
             # This moves frames to selected_frames directory, so must be called after Stella preparation
             selected_high, selected_low = self.frame_processing.select_frames_from_extracted(
                 stitched_path,
@@ -358,6 +365,7 @@ class VideoProcessor:
                 raise Exception(f"Failed to select frames (got {len(selected_high)} high and {len(selected_low)} low frames)")
             
             # Step 8: Store stitched video to API
+            logger.info("Starting video processing task: Step 9: Storing stitched video to API")
             stitched_video_id = None
             if project_id:
                 video_type = self.config.get('processed_video_category', 'video_insta360_processed_stitched')
@@ -387,6 +395,7 @@ class VideoProcessor:
                 self.api_client.update_video_recording_duration(video_recording_id, video_duration)
             
             # Step 9: Optional blur (only for selected frames that go to API)
+            logger.info("Starting video processing task: Step 10: Updating video duration")
             final_high, final_low = self.frame_processing.blur_frames_optional(
                 selected_high,
                 selected_low,
@@ -395,6 +404,7 @@ class VideoProcessor:
             )
             
             # Step 10: Upload selected frames to cloud (1 fps)
+            logger.info("Starting video processing task: Step 11: Uploading selected frames to cloud")
             layer_id = video_recording.get('layer')
             frame_objects = self.frame_processing.upload_frames_to_cloud(
                 final_high + final_low,
@@ -408,10 +418,12 @@ class VideoProcessor:
             
             # Step 11: Use prepared Stella frames for route calculation
             # stella_low_frames are already prepared at configured stella_fps
+            logger.info("Starting video processing task: Step 12: Using prepared Stella frames for route calculation")
             route_frames = stella_low_frames
             logger.info(f"Using {len(route_frames)} frames ({self.stella_fps} fps) for Stella route calculation")
             
             # Step 12: Calculate route using Stella VSLAM (via WSL if configured)
+            logger.info("Starting video processing task: Step 13: Calculating route using Stella VSLAM")
             route_data = None
             if stella_route_future is not None:
                 logger.info("Waiting for background Stella route calculation to finish...")
@@ -495,6 +507,7 @@ class VideoProcessor:
                     logger.warning("Route data returned without raw_path information")
             
             # Step 10: Mark videos for deletion
+            logger.info("Starting video processing task: Step 14: Marking front and back videos for deletion")
             if self.api_client.current_task_id and not self.api_client.test_mode:
                 self.update_status_text(f"Marking front and back videos for deletion in {self.grace_period_days} days (grace period)...")
                 result = self.api_client.mark_videos_for_deletion(self.grace_period_days)
@@ -502,6 +515,7 @@ class VideoProcessor:
                     self.update_status_text("Videos marked for deletion")
             
             # Step 11: Clean local directories
+            logger.info("Starting video processing task: Step 15: Cleaning local directories")
             self.update_status_text("Cleaning local directories...")
             self.clean_local_directories()
             

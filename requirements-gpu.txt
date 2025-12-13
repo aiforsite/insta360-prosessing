@@ -6,9 +6,11 @@
 #   set TMP=D:\temp
 #   set TEMP=D:\temp
 #
-# CUDA wheel index (bundled CUDA runtime in the wheel):
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.1.2+cu121
-torchvision==0.16.2+cu121
+# CUDA wheel index.
+# IMPORTANT: torchvision versions are NOT published with "+cu121" suffix (your error showed only 0.24.1 etc).
+# Select CUDA builds by using the CUDA index-url instead of "+cu121" version suffixes.
+--index-url https://download.pytorch.org/whl/cu121
+torch==2.9.1
+torchvision==0.24.1
 
 

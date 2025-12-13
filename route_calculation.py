@@ -8,6 +8,7 @@ import subprocess
 import json
 import shutil
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime
@@ -384,7 +385,13 @@ class RouteCalculation:
         
         return raw_path
     
-    def calculate_route(self, frame_paths: List[Path], video_path: Path, update_status_callback) -> Optional[Dict]:
+    def calculate_route(
+        self,
+        frame_paths: List[Path],
+        video_path: Path,
+        update_status_callback,
+        started_event: Optional[threading.Event] = None
+    ) -> Optional[Dict]:
         """Calculate route using selected frames (Stella VSLAM) and update raw path.
         
         Args:
@@ -620,6 +627,15 @@ class RouteCalculation:
         
         logger.info(f"Running Stella VSLAM command: {' '.join(cmd)}")
         try:
+            # Signal to caller that we're about to launch the heavy Stella subprocess.
+            # This allows the main pipeline to give Stella a head start before doing
+            # CPU/IO heavy work (e.g., sharpness selection).
+            if started_event is not None:
+                try:
+                    started_event.set()
+                except Exception:
+                    pass
+
             # Set working directory to ensure relative paths work correctly
             # Use absolute path for work_dir
             # For Task Scheduler compatibility, ensure PATH includes system directories

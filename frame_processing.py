@@ -845,7 +845,21 @@ class FrameProcessing:
             
             logger.info(f"Blurred {len(blurred_high)} frame pairs")
             update_status_callback(f"Blurred {len(blurred_high)} frames")
-            return blurred_high, blurred_low
+
+            # IMPORTANT: When blur is enabled, we must upload BOTH the original images and the blurred variants.
+            # The API batch-create creates separate slots for normal (image/high_image) and blur (blur_image/blur_high_image).
+            # If we only pass blurred paths to upload, the normal slots will be created but binaries will remain missing.
+            upload_high: List[Path] = list(high_frames)
+            upload_low: List[Path] = list(low_frames)
+
+            for p in blurred_high:
+                if p and p.exists() and p not in upload_high:
+                    upload_high.append(p)
+            for p in blurred_low:
+                if p and p.exists() and p not in upload_low:
+                    upload_low.append(p)
+
+            return upload_high, upload_low
         except Exception as e:
             logger.error(f"Frame blurring failed: {e}")
             update_status_callback(f"Error in frame blurring: {str(e)}")

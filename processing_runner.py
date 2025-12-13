@@ -12,6 +12,7 @@ import os
 import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
@@ -346,12 +347,21 @@ class VideoProcessor:
                 f"Starting Stella route calculation in background using {len(stella_low_frames)} frames ({self.stella_fps} fps)"
             )
             stella_executor = ThreadPoolExecutor(max_workers=1)
+            stella_started_event = threading.Event()
             stella_route_future = stella_executor.submit(
                 self.route_calculation.calculate_route,
                 stella_low_frames,
                 stitched_path,
                 self.update_status_text,
+                stella_started_event,
             )
+
+            # Give Stella a head start before doing CPU/IO heavy sharpness selection.
+            # We only wait briefly so we don't risk stalling if something goes wrong early.
+            try:
+                stella_started_event.wait(timeout=5.0)
+            except Exception:
+                pass
             
             # Step 8: Select best frames (1 fps) from extracted frames for API storage
             logger.info("Starting video processing task: Step 8: Starting Stella route calculation in background")

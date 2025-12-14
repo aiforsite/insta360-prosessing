@@ -221,3 +221,13 @@ To update code on the server:
 - Pull changes from GitHub manually (e.g. `git pull`)
 - Restart the runner (Task Scheduler task / reboot / restart process)
 - Verify logs after restart
+
+## 12) Disable automatic Windows Updates on production machines
+
+On production processing machines, disable automatic Windows Updates to prevent surprise downloads/reboots during processing.
+
+Recommended approach:
+- Disable automatic updates (via Group Policy / Windows Update settings)
+- Apply updates **manually** during a planned maintenance window (and reboot when safe)
+
+This keeps the processing runner stable and avoids mid-task interruptions.

@@ -22,6 +22,13 @@ This project contains a video processing script that:
 - API access to the target system
 - PyTorch + TorchVision (for GPU-accelerated blur, optional but recommended)
 
+### Server / Operations setup (Windows + WSL)
+
+For a step-by-step server setup checklist (WSL + Stella, MediaSDK, FFmpeg, Python venv, GPU/CUDA, Task Scheduler, and ops notes), see:
+- `ENVIRONMENT_SETUP.md`
+
+Note: code updates are currently **manual** (no CI/CD deployment for the processing server yet).
+
 ### Installation
 
 1. Install Python dependencies:

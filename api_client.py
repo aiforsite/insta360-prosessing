@@ -85,7 +85,7 @@ class MediaServerAPIClient:
         logger.debug("Fetching next video task from Media Server API...")
         payload = {
             "task_type": "process_360_video", 
-            "environment": "development", # production
+            "environment": "development,production",
             "worker_id": self.worker_id,
             "change_status": "false" if reset else "true"
         }

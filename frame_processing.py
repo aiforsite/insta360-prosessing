@@ -751,6 +751,9 @@ class FrameProcessing:
         frame_index_to_stella_index = {orig_idx: seq_idx for seq_idx, orig_idx in enumerate(frame_indices)}
         
         # Find selected frames and copy them to selected directory
+        # For video frames, create smaller video-res version (1920x960) for faster loading
+        # Stella keeps using 3840x1920, but video frame 'image' uses smaller 1920x960
+        logger.info("Creating video-res versions (1920x960) for selected frames...")
         for frame_num in selected_suffixes:
             try:
                 # Find high frame in high_dir (uses original frame index)
@@ -759,17 +762,17 @@ class FrameProcessing:
                     selected_high_path = selected_dir / f"high_{frame_num:06d}.jpg"
                     shutil.copy2(str(high_path), str(selected_high_path))
                     final_selected_high.append(selected_high_path)
-                
-                # Find low frame in Stella directory (uses sequential index, not original frame index)
-                stella_frame_num = frame_index_to_stella_index.get(frame_num)
-                if stella_frame_num is not None:
-                    stella_low_path = stella_dir / f"stella_{stella_frame_num:06d}.jpg"
-                    if stella_low_path.exists():
-                        selected_low_path = selected_dir / f"low_{frame_num:06d}.jpg"
-                        shutil.copy2(str(stella_low_path), str(selected_low_path))
-                        final_selected_low.append(selected_low_path)
+                    
+                    # Create video-res version (1920x960) from high-res for faster video mode loading
+                    # This is half the size of low-res (3840x1920) used by Stella
+                    selected_low_path = selected_dir / f"low_{frame_num:06d}.jpg"
+                    with Image.open(high_path) as img:
+                        # Resize to video resolution (1920x960) - half of Stella's 3840x1920
+                        video_img = img.resize((1920, 960), Image.Resampling.LANCZOS)
+                        video_img.save(selected_low_path, quality=85, optimize=True)
+                    final_selected_low.append(selected_low_path)
             except Exception as e:
-                logger.warning(f"Failed to copy selected frame {frame_num} to selected directory: {e}")
+                logger.warning(f"Failed to create selected frame {frame_num} in selected directory: {e}")
         
         # Delete unselected high frames to save space
         for high_path in high_dir.glob("high_*.jpg"):
@@ -857,26 +860,32 @@ class FrameProcessing:
         selected_high.sort(key=lambda f: int(f.stem.split("_")[-1]))
         selected_low.sort(key=lambda f: int(f.stem.split("_")[-1]))
         
-        # Move frames in parallel
-        def move_frame_pair(high_frame: Path, low_frame: Path) -> Tuple[Path, Path]:
-            """Move a pair of frames to selected directory."""
+        # Move high frames and create video-res versions (1920x960) for faster video mode loading
+        # Stella keeps using 3840x1920, but video frame 'image' uses smaller 1920x960
+        def move_high_and_create_video_res(high_frame: Path) -> Tuple[Path, Path]:
+            """Move high frame and create video-res version (1920x960) from high-res."""
             suffix = high_frame.stem.split("_")[-1]
             new_high = selected_dir / f"high_{suffix}.jpg"
             new_low = selected_dir / f"low_{suffix}.jpg"
             
             shutil.move(str(high_frame), str(new_high))
-            shutil.move(str(low_frame), str(new_low))
+            
+            # Create video-res version (1920x960) from high-res for faster video mode loading
+            # This is half the size of low-res (3840x1920) used by Stella
+            with Image.open(new_high) as img:
+                video_img = img.resize((1920, 960), Image.Resampling.LANCZOS)
+                video_img.save(new_low, quality=85, optimize=True)
             
             return new_high, new_low
         
-        logger.debug(f"Moving {len(selected_high)} selected frame pairs...")
+        logger.debug(f"Moving {len(selected_high)} selected high frames and creating video-res versions (1920x960)...")
         with ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_pair = {
-                executor.submit(move_frame_pair, high, low): (high, low)
-                for high, low in zip(selected_high, selected_low)
+            future_to_frame = {
+                executor.submit(move_high_and_create_video_res, high): high
+                for high in selected_high
             }
             
-            for future in as_completed(future_to_pair):
+            for future in as_completed(future_to_frame):
                 new_high, new_low = future.result()
                 final_high.append(new_high)
                 final_low.append(new_low)
@@ -1021,10 +1030,12 @@ class FrameProcessing:
                                 det_w, det_h = high_img.size
 
                         # Scale factors from HIGH-res -> LOW-res coordinate space
+                        # These are calculated dynamically based on actual image sizes, so they work
+                        # with any low-res resolution (3840x1920 for Stella, 1920x960 for video frames)
                         scale_x = (low_size[0] / float(det_w)) if det_w else 1.0
                         scale_y = (low_size[1] / float(det_h)) if det_h else 1.0
 
-                        # Keep min_box_area semantics in ORIGINAL LOW-res pixel space.
+                        # Keep min_box_area semantics in LOW-res pixel space (works with any low-res size).
                         # Convert threshold to detector-space (high-res) so config doesn't need retuning.
                         area_scale = max(1e-6, (float(det_w) / low_size[0]) * (float(det_h) / low_size[1]))
                         primary_min_area_det = self.blur_min_box_area * area_scale
@@ -1429,31 +1440,8 @@ class FrameProcessing:
         selected_dir = self.work_dir / "selected_frames"
         selected_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy selected LOW frames to selected directory with original suffix numbering
-        suffix_to_low: Dict[int, Path] = {}
-        for p in all_low_frames:
-            try:
-                suffix = int(p.stem.split("_")[-1])
-                suffix_to_low[suffix] = p
-            except Exception:
-                continue
-
-        final_low: List[Path] = []
-        for suffix in selected_suffixes:
-            src = suffix_to_low.get(suffix)
-            if not src or not src.exists():
-                logger.warning(f"Selected low frame missing for suffix {suffix}")
-                continue
-            dst = selected_dir / f"low_{suffix:06d}.jpg"
-            try:
-                if dst.exists():
-                    dst.unlink()
-                shutil.copy2(str(src), str(dst))
-                final_low.append(dst)
-            except Exception as e:
-                logger.warning(f"Failed to copy selected low frame {src} -> {dst}: {e}")
-
-        # Extract HIGH frames only for selected suffixes
+        # Extract HIGH frames only for selected suffixes first
+        # Then create video-res versions (1920x960) from high-res for faster video mode loading
         try:
             final_high = self._extract_selected_high_frames(
                 video_path=video_path,
@@ -1471,6 +1459,24 @@ class FrameProcessing:
         except Exception as e:
             logger.error(f"Selected high-res extraction failed: {e}", exc_info=True)
             final_high = []
+        
+        # Create video-res versions (1920x960) from high-res frames for faster video mode loading
+        # Stella keeps using 3840x1920, but video frame 'image' uses smaller 1920x960
+        logger.info("Creating video-res versions (1920x960) for selected frames...")
+        final_low: List[Path] = []
+        for high_frame in final_high:
+            try:
+                suffix = int(high_frame.stem.split("_")[-1])
+                video_low_path = selected_dir / f"low_{suffix:06d}.jpg"
+                
+                # Create video-res version (1920x960) from high-res
+                # This is half the size of low-res (3840x1920) used by Stella
+                with Image.open(high_frame) as img:
+                    video_img = img.resize((1920, 960), Image.Resampling.LANCZOS)
+                    video_img.save(video_low_path, quality=85, optimize=True)
+                final_low.append(video_low_path)
+            except Exception as e:
+                logger.warning(f"Failed to create video-res frame for {high_frame}: {e}")
 
         # Optional cleanup: delete low-res candidates to save space (stella_frames are already copied)
         for low_path in (self.work_dir / "low_frames").glob("low_*.jpg"):

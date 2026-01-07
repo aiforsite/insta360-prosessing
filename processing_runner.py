@@ -315,6 +315,56 @@ class VideoProcessor:
                     logger.warning("Could not determine video duration, defaulting to 10 minutes")
                     video_duration = 600.0  # 10 minutes
             
+            # Step 5.5: Extract and save recording_started from video metadata
+            logger.info("Starting video processing task: Step 5.5: Extracting recording start time")
+            recording_started = None
+            
+            # Try to get from stitched video first
+            recording_started = self.video_processing.get_video_creation_time(stitched_path)
+            
+            # Fallback to front video if not found in stitched video
+            if not recording_started:
+                recording_started = self.video_processing.get_video_creation_time(front_path)
+            
+            # Fallback to back video if still not found
+            if not recording_started:
+                recording_started = self.video_processing.get_video_creation_time(back_path)
+            
+            # Final fallback: use upload time from video_recording (created_at or uploaded_at)
+            if not recording_started:
+                logger.warning("Could not extract recording_started from video metadata, using upload time")
+                # Try created_at first, then uploaded_at
+                created_at = video_recording.get('created_at')
+                uploaded_at = video_recording.get('uploaded_at')
+                
+                if created_at:
+                    try:
+                        from datetime import datetime
+                        # Parse ISO format datetime and format to YYYY-MM-DDTHH:MM:SS
+                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        recording_started = dt.strftime('%Y-%m-%dT%H:%M:%S')
+                        logger.info(f"Using video_recording created_at as recording_started: {recording_started}")
+                    except (ValueError, AttributeError) as e:
+                        logger.warning(f"Could not parse created_at: {e}")
+                
+                if not recording_started and uploaded_at:
+                    try:
+                        from datetime import datetime
+                        # Parse ISO format datetime and format to YYYY-MM-DDTHH:MM:SS
+                        dt = datetime.fromisoformat(uploaded_at.replace('Z', '+00:00'))
+                        recording_started = dt.strftime('%Y-%m-%dT%H:%M:%S')
+                        logger.info(f"Using video_recording uploaded_at as recording_started: {recording_started}")
+                    except (ValueError, AttributeError) as e:
+                        logger.warning(f"Could not parse uploaded_at: {e}")
+            
+            if recording_started:
+                logger.info(f"Extracted recording_started: {recording_started}")
+                # Update video-recording with recording_started
+                if video_recording_id:
+                    self.api_client.update_video_recording_started(video_recording_id, recording_started)
+            else:
+                logger.warning("Could not extract recording_started from video metadata or video_recording")
+            
             # Step 6: Extract low-res frames from stitched video using FFmpeg (once at candidates_per_second fps)
             logger.info("Starting video processing task: Step 6: Extracting low-res frames")
             # These low-res frames are used for:

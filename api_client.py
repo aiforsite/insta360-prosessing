@@ -1162,6 +1162,33 @@ class APIClient:
             logger.warning(f"Failed to update video-recording duration")
             return False
     
+    def update_video_recording_started(self, video_recording_id: str, recording_started: str) -> bool:
+        """Update video-recording recording_started field with ISO format datetime.
+        
+        Args:
+            video_recording_id: Video recording UUID
+            recording_started: Recording start time in ISO format (YYYY-MM-DDTHH:MM:SS)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not video_recording_id:
+            logger.warning("Cannot update recording_started: missing video_recording_id")
+            return False
+        
+        logger.info(f"Updating video-recording {video_recording_id} recording_started to {recording_started}...")
+        result = self._api_request(
+            'PATCH',
+            f'/api/v1/video-recording/{video_recording_id}',
+            json={'recording_started': recording_started}
+        )
+        if result is not None:
+            logger.info(f"Video-recording recording_started updated successfully")
+            return True
+        else:
+            logger.warning(f"Failed to update video-recording recording_started")
+            return False
+    
     def mark_videos_for_deletion(self, grace_period_days: int) -> bool:
         """Mark front and back videos for deletion after grace period using FileDeleteSchedule."""
         if not self.current_video_recording_id:

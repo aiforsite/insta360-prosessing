@@ -280,6 +280,84 @@ class VideoProcessing:
             logger.warning(f"Unexpected error getting video duration: {e}")
             return None
     
+    def get_video_creation_time(self, video_path: Path) -> Optional[str]:
+        """
+        Get video creation time from metadata using ffprobe.
+        
+        Args:
+            video_path: Path to video file
+        
+        Returns:
+            Creation time in ISO format (YYYY-MM-DDTHH:MM:SS), or None if unable to determine
+        """
+        try:
+            # Try to get creation_time from format tags
+            ffprobe_cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'format_tags=creation_time',
+                '-of', 'json',
+                str(video_path)
+            ]
+            result = subprocess.run(
+                ffprobe_cmd,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                import json
+                probe_data = json.loads(result.stdout)
+                creation_time = probe_data.get('format', {}).get('tags', {}).get('creation_time')
+                
+                if creation_time:
+                    # ffprobe returns creation_time in format: 2024-01-15T10:30:45.000000Z
+                    # Convert to ISO format without microseconds and timezone
+                    # Parse and reformat to ensure proper ISO format
+                    from datetime import datetime
+                    try:
+                        # Try parsing with microseconds and timezone
+                        dt = datetime.fromisoformat(creation_time.replace('Z', '+00:00'))
+                        # Format to ISO without microseconds: YYYY-MM-DDTHH:MM:SS
+                        iso_time = dt.strftime('%Y-%m-%dT%H:%M:%S')
+                        logger.info(f"Video creation time: {iso_time}")
+                        return iso_time
+                    except ValueError:
+                        # Fallback: try parsing without timezone
+                        try:
+                            dt = datetime.fromisoformat(creation_time.split('.')[0])
+                            iso_time = dt.strftime('%Y-%m-%dT%H:%M:%S')
+                            logger.info(f"Video creation time: {iso_time}")
+                            return iso_time
+                        except ValueError:
+                            logger.warning(f"Could not parse creation_time format: {creation_time}")
+                            return None
+            
+            # Fallback: try to get from file modification time if metadata not available
+            logger.warning(f"Could not extract creation_time from video metadata, trying file modification time")
+            try:
+                from datetime import datetime
+                import os
+                mtime = os.path.getmtime(video_path)
+                dt = datetime.fromtimestamp(mtime)
+                iso_time = dt.strftime('%Y-%m-%dT%H:%M:%S')
+                logger.info(f"Using file modification time as creation time: {iso_time}")
+                return iso_time
+            except Exception as e:
+                logger.warning(f"Could not get file modification time: {e}")
+                return None
+                
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.warning(f"ffprobe not available or timeout: {e}")
+            return None
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.warning(f"Could not parse ffprobe output: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Error getting video creation time: {e}")
+            return None
+    
     def _infer_file_extension(self, url: str, default_extension: str = ".mp4") -> str:
         """Infer file extension from URL query/path (handles S3 response-content-disposition)."""
         try:

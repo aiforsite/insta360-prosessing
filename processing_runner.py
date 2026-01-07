@@ -316,17 +316,14 @@ class VideoProcessor:
                     video_duration = 600.0  # 10 minutes
             
             # Step 5.5: Extract and save recording_started from video metadata
+            # Get creation time from front or back video (not from stitched video)
             logger.info("Starting video processing task: Step 5.5: Extracting recording start time")
             recording_started = None
             
-            # Try to get from stitched video first
-            recording_started = self.video_processing.get_video_creation_time(stitched_path)
+            # Try to get from front video first
+            recording_started = self.video_processing.get_video_creation_time(front_path)
             
-            # Fallback to front video if not found in stitched video
-            if not recording_started:
-                recording_started = self.video_processing.get_video_creation_time(front_path)
-            
-            # Fallback to back video if still not found
+            # Fallback to back video if not found in front video
             if not recording_started:
                 recording_started = self.video_processing.get_video_creation_time(back_path)
             

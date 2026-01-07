@@ -309,7 +309,13 @@ class VideoProcessing:
             if result.returncode == 0:
                 import json
                 probe_data = json.loads(result.stdout)
+                # Try to get creation_time from format tags
+                # ffprobe returns: {"format": {"tags": {"creation_time": "2025-08-19T09:18:07.000000Z"}}}
                 creation_time = probe_data.get('format', {}).get('tags', {}).get('creation_time')
+                
+                if not creation_time:
+                    # Fallback: try to get from format level (some videos might have it there)
+                    creation_time = probe_data.get('format', {}).get('creation_time')
                 
                 if creation_time:
                     # ffprobe returns creation_time in format: 2024-01-15T10:30:45.000000Z

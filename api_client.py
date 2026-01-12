@@ -925,41 +925,115 @@ class APIClient:
             
             if nudged is not None and len(raw_path_xz) >= 2:
                 try:
-                    # Get first and last points from raw_path
-                    x1_original = raw_path_xz[0][0]
-                    z1_original = raw_path_xz[0][1]
-                    xN_original = raw_path_xz[-1][0]
-                    zN_original = raw_path_xz[-1][1]
+                    # Get first and last points from raw_path (Stella coordinates)
+                    x1_stella = raw_path_xz[0][0]
+                    z1_stella = raw_path_xz[0][1]
+                    xN_stella = raw_path_xz[-1][0]
+                    zN_stella = raw_path_xz[-1][1]
                     
-                    # Use similarity transformation to preserve route shape
-                    # IMPORTANT: get_rx_ry swaps coordinates (rx = z, ry = x)
-                    # So we need to map [x, z] to [ry, rx] in the transformation
-                    # domain_points: [x, z] from Stella
-                    # range_points: [ry, rx] for the transformation (will be swapped back in get_rx_ry)
-                    domain_points = [[x1_original, z1_original], [xN_original, zN_original]]
-                    # Map to [ry, rx] because get_rx_ry will swap: rx = z, ry = x
-                    # So if we want starting_position = (rx_start, ry_start), we need to map to [ry_start, rx_start]
-                    range_points = [[starting_position[1], starting_position[0]], [ending_position[1], ending_position[0]]]
+                    # Calculate Stella distance
+                    stella_dx = xN_stella - x1_stella
+                    stella_dz = zN_stella - z1_stella
+                    stella_distance = math.sqrt(stella_dx**2 + stella_dz**2)
                     
-                    # Estimate similarity transformation (preserves angles and ratios)
+                    # Map coordinates: get_rx_ry swaps (rx = z, ry = x)
+                    # So Stella [x, z] maps to map [ry, rx]
+                    map_rx1 = starting_position[0]  # map start rx
+                    map_ry1 = starting_position[1]  # map start ry
+                    map_rxN = ending_position[0]    # map end rx
+                    map_ryN = ending_position[1]    # map end ry
+                    
+                    # Calculate map distance
+                    map_drx = map_rxN - map_rx1  # corresponds to stella z
+                    map_dry = map_ryN - map_ry1  # corresponds to stella x
+                    map_distance = math.sqrt(map_drx**2 + map_dry**2)
+                    
+                    # Calculate scale factor explicitly: map_distance / stella_distance
+                    if stella_distance > 0:
+                        scale_factor = map_distance / stella_distance
+                        logger.info(f"Route transformation: Stella distance={stella_distance:.6f}, Map distance={map_distance:.6f}, Scale factor={scale_factor:.6f}")
+                    else:
+                        logger.warning("Stella start/end distance is zero, cannot calculate scale")
+                        scale_factor = 1.0
+                        use_similarity_transform = False
+                        raise ValueError("Stella distance is zero")
+                    
+                    # Prepare points for similarity transformation
+                    # domain_points: Stella coordinates [x, z]
+                    # range_points: Map coordinates [ry, rx] (swapped because get_rx_ry swaps)
+                    domain_points = [[x1_stella, z1_stella], [xN_stella, zN_stella]]
+                    range_points = [[map_ry1, map_rx1], [map_ryN, map_rxN]]
+                    
+                    # Estimate similarity transformation (handles scale, rotation, translation)
                     trans = nudged.estimate(domain_points, range_points)
                     
-                    # Transform all raw_path points using similarity transformation
-                    for point in raw_path_xz:
-                        transformed = trans.transform(point)
-                        # Store as [x, z] - get_rx_ry will swap them to [rx, ry]
-                        cartesian_path.append([float(transformed[0]), float(transformed[1])])
+                    # Verify the transformation scale matches our calculation
+                    trans_scale = trans.get_scale() if hasattr(trans, 'get_scale') else None
+                    if trans_scale:
+                        scale_diff = abs(trans_scale - scale_factor)
+                        logger.info(f"Transformation scale: {trans_scale:.6f} (expected: {scale_factor:.6f}, diff: {scale_diff:.6f})")
+                        
+                        # If scale differs significantly, apply scale correction
+                        if scale_diff > 0.0001:
+                            logger.warning(f"Scale mismatch detected! Transformation scale ({trans_scale:.6f}) differs from calculated scale ({scale_factor:.6f})")
+                            # Apply scale correction: manually apply scale, rotation, translation
+                            trans_rotation = trans.get_rotation() if hasattr(trans, 'get_rotation') else 0.0
+                            
+                            # Transform all points manually with corrected scale
+                            cartesian_path = []
+                            for point in raw_path_xz:
+                                # 1. Translate to origin (relative to start point)
+                                rel_x = point[0] - x1_stella
+                                rel_z = point[1] - z1_stella
+                                
+                                # 2. Apply scale
+                                scaled_x = rel_x * scale_factor
+                                scaled_z = rel_z * scale_factor
+                                
+                                # 3. Apply rotation (from transformation)
+                                cos_r = math.cos(trans_rotation)
+                                sin_r = math.sin(trans_rotation)
+                                rotated_x = scaled_x * cos_r - scaled_z * sin_r
+                                rotated_z = scaled_x * sin_r + scaled_z * cos_r
+                                
+                                # 4. Translate to map start position (remember: rx = z, ry = x)
+                                final_ry = rotated_x + map_ry1
+                                final_rx = rotated_z + map_rx1
+                                
+                                # Store as [x, z] - get_rx_ry will swap them to [rx, ry]
+                                cartesian_path.append([final_ry, final_rx])
+                            
+                            logger.info("Applied scale correction to route transformation")
+                        else:
+                            # Use transformation as-is if scale matches
+                            for point in raw_path_xz:
+                                transformed = trans.transform(point)
+                                cartesian_path.append([float(transformed[0]), float(transformed[1])])
+                    else:
+                        # If we can't get scale, use transformation as-is
+                        for point in raw_path_xz:
+                            transformed = trans.transform(point)
+                            cartesian_path.append([float(transformed[0]), float(transformed[1])])
                     
-                    # Verify first point maps correctly
-                    first_transformed = cartesian_path[0]
-                    first_rx_ry = get_rx_ry(first_transformed)
-                    logger.info(f"Similarity transformation: first point [x={raw_path_xz[0][0]:.3f}, z={raw_path_xz[0][1]:.3f}] -> "
-                               f"[x'={first_transformed[0]:.3f}, z'={first_transformed[1]:.3f}] -> "
-                               f"rx={first_rx_ry[0]:.3f}, ry={first_rx_ry[1]:.3f} "
-                               f"(expected: rx={starting_position[0]:.3f}, ry={starting_position[1]:.3f})")
+                    # Verify transformation: check start and end points
+                    if cartesian_path:
+                        first_transformed = cartesian_path[0]
+                        first_rx_ry = get_rx_ry(first_transformed)
+                        last_transformed = cartesian_path[-1]
+                        last_rx_ry = get_rx_ry(last_transformed)
+                        
+                        logger.info(f"Transformation verification:")
+                        logger.info(f"  Start: [{first_rx_ry[0]:.6f}, {first_rx_ry[1]:.6f}] (expected: [{map_rx1:.6f}, {map_ry1:.6f}])")
+                        logger.info(f"  End:   [{last_rx_ry[0]:.6f}, {last_rx_ry[1]:.6f}] (expected: [{map_rxN:.6f}, {map_ryN:.6f}])")
+                        
+                        # Check accuracy
+                        start_error = math.sqrt((first_rx_ry[0] - map_rx1)**2 + (first_rx_ry[1] - map_ry1)**2)
+                        end_error = math.sqrt((last_rx_ry[0] - map_rxN)**2 + (last_rx_ry[1] - map_ryN)**2)
+                        if start_error > 0.001 or end_error > 0.001:
+                            logger.warning(f"Transformation accuracy: start error={start_error:.6f}, end error={end_error:.6f}")
                     
                     use_similarity_transform = True
-                    logger.info("Using similarity transformation to preserve route shape")
+                    logger.info("Route transformed: scaled, rotated, and aligned to map using start/end points")
                     
                 except Exception as e:
                     logger.warning(f"Similarity transformation failed: {e}, using raw coordinates")

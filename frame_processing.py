@@ -1015,6 +1015,8 @@ class FrameProcessing:
 
                     with Image.open(high_frame) as high_img:
                         high_img = high_img.convert("RGB")
+                        # Ensure image is fully loaded into memory
+                        high_img.load()
                         high_size = high_img.size
 
                         det_img = high_img
@@ -1028,6 +1030,11 @@ class FrameProcessing:
                             except Exception:
                                 det_img = high_img
                                 det_w, det_h = high_img.size
+                        
+                        # Ensure det_img is a copy if it's the same as high_img (to avoid issues when with block exits)
+                        if det_img is high_img:
+                            # Create a copy to ensure it's independent of the file handle
+                            det_img = high_img.copy()
 
                         # Scale factors from HIGH-res -> LOW-res coordinate space
                         # These are calculated dynamically based on actual image sizes, so they work
